@@ -1,0 +1,670 @@
+<!doctype html><html lang="fr-CH"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Planning service technique</title><style>
+:root{font-family:system-ui,-apple-system,Arial,sans-serif;color:#183047;background:#f3f6fa}*{box-sizing:border-box}body{margin:0}header{background:#173b60;color:white;padding:20px max(16px,calc((100% - 1250px)/2))}h1{margin:0;font-size:23px}header p{margin:5px 0 0;opacity:.8;font-size:13px}.wrap{max-width:1250px;margin:auto;padding:16px}.tabs,.toolbar,.flex{display:flex;flex-wrap:wrap;align-items:center;gap:8px}.tabs{margin-bottom:12px}button{font:inherit;border:0;border-radius:8px;padding:9px 12px;background:#e6edf5;color:#173b60;cursor:pointer;font-weight:600}button.primary,.tabs button.on{background:#1264a4;color:white}button.red{color:#a32323;background:#ffe9e9}button:disabled{opacity:.5}input,select{font:inherit;padding:9px;border:1px solid #cbd6e0;border-radius:8px;background:white;max-width:100%}input[type=checkbox]{width:auto}.card{background:white;padding:17px;border-radius:13px;box-shadow:0 2px 13px #12273a0b;margin:12px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.field{display:flex;flex-direction:column;gap:5px}.field label{font-weight:650;font-size:13px}.muted{font-size:13px;color:#63768a}.scroll{overflow:auto}table{border-collapse:collapse;width:100%;font-size:13px}th,td{border-bottom:1px solid #e4eaf0;padding:8px;text-align:left;vertical-align:top}th{background:#edf3f8}h2{margin:0 0 12px;font-size:20px}h3{margin:16px 0 8px;font-size:16px}.pill{display:inline-block;padding:4px 7px;border-radius:6px;background:#e5effa;margin:2px;font-size:12px}.danger{background:#ffeded;border-left:4px solid #c93434;padding:10px;margin:6px 0}.warn{background:#fff6df;border-left:4px solid #dba32b;padding:10px;margin:6px 0}.ok{background:#e6f7ec;padding:10px;border-radius:7px}.badge{background:#e6eff9;padding:5px 8px;border-radius:7px;font-size:12px}.daycell{min-width:155px}.daycell button{display:block;width:100%;text-align:left;font-size:12px;font-weight:500;margin:3px 0;padding:7px}.vac{background:#eee5fa;color:#67339a}.cur{background:#d8f1e8}.liv{background:#e2ecff}.des{background:#fff1ce}.prev{background:#ebedf0}.foot{color:#687889;font-size:12px;margin:25px 0}.stat{background:#f1f6fb;padding:12px;border-radius:8px;min-width:135px;flex:1}.stat b{font-size:22px;display:block}.small{font-size:12px}.nowrap{white-space:nowrap}@media(max-width:650px){.wrap{padding:9px}.card{padding:12px}h1{font-size:20px}td,th{padding:6px;font-size:12px}}
+.extra{background:#dcf3f5}.travel{background:#dceefa;color:#15537a}
+</style></head><body><header><h1>Planning des secteurs</h1><p>La Chaux-de-Fonds · Bassecourt · VERSION TEST · 2026.11 — Fabien & Nathalie (données fictives)</p></header><div class="wrap"><div id="sectors" class="tabs"></div><div id="tabs" class="tabs"></div><main id="app"></main><p class="foot">Démonstration sur GitHub : données fictives sauvegardées uniquement dans ce navigateur. Aucune synchronisation avec Infomaniak ni authentification réelle. Ne pas saisir de données personnelles ni utiliser pour la paie.</p></div><script>
+'use strict';
+const SITES=['La Chaux-de-Fonds','Bassecourt'],DAYS=['Lundi','Mardi','Mercredi','Jeudi','Vendredi'],MISSIONS=['curatif','livraison','desinfection','preventif'],LABEL={curatif:'SAV curatif',livraison:'Livraison',desinfection:'Désinfection',preventif:'SAV préventif'},CLS={curatif:'cur',livraison:'liv',desinfection:'des',preventif:'prev'},TABS=['Planning','Employés','Vacances et absences','Missions','Règles','Piquets annuels','Vigilance','Journal','Paramètres'];
+const BASE_MISSIONS=[...MISSIONS];
+function syncCustomMissions(){
+ for(const m of MISSIONS.slice(BASE_MISSIONS.length)){delete LABEL[m];delete CLS[m]}
+ MISSIONS.splice(BASE_MISSIONS.length);
+ if(!Array.isArray(state.customMissions))state.customMissions=[];
+ if(!state.siteOverrides||typeof state.siteOverrides!=='object')state.siteOverrides={};
+ for(const m of state.customMissions){if(!m||!/^mission_[a-z0-9]+$/.test(m.id)||typeof m.name!=='string')continue;MISSIONS.push(m.id);LABEL[m.id]=m.name;CLS[m.id]='extra'}
+}
+const $=id=>document.getElementById(id),esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const defaultRules=()=>SITES.map(()=>[{curatif:5,livraison:5,desinfection:2.5},{curatif:5,livraison:4,desinfection:1.5},{curatif:5,livraison:3,desinfection:1.5}]);
+const seed=()=>({
+  year:new Date().getFullYear(),week:1,siteView:'all',tab:'Planning',
+  employees:[
+    {id:'fabien',name:'Fabien',site:0,rate:100,days:[1,1,1,1,1],skills:[...MISSIONS],piquet:true,only:false},
+    {id:'nathalie',name:'Nathalie',site:1,rate:100,days:[1,1,1,1,1],skills:[...MISSIONS],piquet:true,only:false}
+  ],absences:[],holidays:[],assignments:{},piquets:{},
+  preferred:[{id:'fabien',days:3},{id:'nathalie',days:5}],rules:defaultRules(),references:{}
+});
+let state;try{state={...seed(),...JSON.parse(localStorage.getItem('planning_service_technique_TEST_heures_2026v1')||'{}')}}catch{state=seed()}// Journal local : compare les données métier avant chaque rendu, sans journaliser la navigation.
+let auditBaseline=null;
+function auditSnapshot(){
+ const a=state.admin||{};
+ return {tech:{assignments:state.assignments||{},absences:state.absences||[],employees:state.employees||[],rules:state.rules||[],preferred:state.preferred||[],piquets:state.piquets||{},holidays:state.holidays||[],customMissions:state.customMissions||[],siteOverrides:state.siteOverrides||{}},admin:{assignments:a.assignments||{},absences:a.absences||[],employees:a.employees||[],rules:a.rules||[],tasks:a.tasks||[]}};
+}
+function auditCapture(){
+ syncCustomMissions();
+ const current=auditSnapshot();
+ if(auditBaseline){
+  if(!Array.isArray(state.auditLog))state.auditLog=[];
+  for(const sector of ['tech','admin'])for(const field of Object.keys(current[sector])){
+   const before=auditBaseline[sector][field],after=current[sector][field];
+   if(JSON.stringify(before)===JSON.stringify(after))continue;
+   const dict={assignments:'Planning',absences:'Vacances / absences',employees:'Employés',rules:'Règles',preferred:'Préférences de livraison',piquets:'Piquets SAV',holidays:'Fermetures',tasks:'Tâches',customMissions:'Missions personnalisées',siteOverrides:'Déplacements entre sites'};
+   let detail='',count=1;
+   if(field==='assignments'||field==='piquets'||field==='siteOverrides'){
+    const keys=new Set([...Object.keys(before||{}),...Object.keys(after||{})]);
+    const changed=[...keys].filter(k=>JSON.stringify(before?.[k])!==JSON.stringify(after?.[k]));count=changed.length;
+    const example=changed.slice(0,5).map(k=>{
+      if(field==='piquets'||field==='siteOverrides')return k+': '+(before?.[k]??'—')+' → '+(after?.[k]??'—');
+      const [d,id]=k.split('|');const employees=sector==='tech'?state.employees:state.admin?.employees;
+      const name=employees?.find(e=>e.id===id)?.name||id;
+      const fmt=x=>{const v=normalize(x);return (v.am||'Libre')+' / '+(v.pm||'Libre')};
+      return d+' '+name+': '+fmt(before?.[k])+' → '+fmt(after?.[k]);
+    });detail=example.join(' ; ')+(count>5?' ; …':'');
+   }else if(Array.isArray(before)&&Array.isArray(after)){
+    const idKey=field==='rules'||field==='preferred'?null:'id';
+    if(idKey){const b=new Map(before.map(x=>[x.id,JSON.stringify(x)])),n=new Map(after.map(x=>[x.id,JSON.stringify(x)]));count=new Set([...b.keys(),...n.keys()]).size;count=[...new Set([...b.keys(),...n.keys()])].filter(k=>b.get(k)!==n.get(k)).length;}
+    detail=field==='rules'?'Modification des objectifs par succursale':field==='preferred'?'Modification des priorités de livraison':`${count} élément(s) ajouté(s), modifié(s) ou retiré(s)`;
+   }
+   state.auditLog.unshift({id:'j'+Date.now()+'-'+Math.random().toString(36).slice(2,7),at:new Date().toISOString(),sector,category:dict[field]||field,count,detail});
+  }
+  if(state.auditLog.length>1500)state.auditLog.length=1500;
+ }
+ auditBaseline=JSON.parse(JSON.stringify(current));
+}
+function journalPage(){
+ const log=Array.isArray(state.auditLog)?state.auditLog:[];
+ return `<div class="card"><h2>Journal des modifications</h2><p class="muted">Historique des modifications du planning, des piquets, des vacances, des employés, des tâches et des règles. Les changements sont enregistrés sur cet appareil et inclus dans l’export JSON. Le journal ne permet pas d’identifier la personne ayant fait la modification, car il n’y a pas de connexion utilisateur.</p><div class="toolbar"><label>Secteur <select id="journalSector"><option value="all">Les deux secteurs</option><option value="tech">Service technique</option><option value="admin">Administratif</option></select></label><label>Type <select id="journalCategory"><option value="all">Tous les changements</option>${[...new Set(log.map(x=>x.category))].sort().map(x=>`<option value="${esc(x)}">${esc(x)}</option>`).join('')}</select></label><button id="journalExport">Exporter le journal CSV</button><button id="journalClear" class="red">Vider le journal</button></div><p class="muted">${log.length} entrée(s) enregistrée(s). Les modifications antérieures à l’installation de cette version ne peuvent pas être reconstituées.</p></div><div class="card scroll"><table><thead><tr><th>Date et heure</th><th>Secteur</th><th>Modification</th><th>Détails</th></tr></thead><tbody id="journalRows"></tbody></table></div>`;
+}
+function bindJournal(){
+ const rows=$('journalRows');if(!rows)return;
+ const refresh=()=>{const sector=$('journalSector').value,category=$('journalCategory').value;const items=(state.auditLog||[]).filter(x=>(sector==='all'||x.sector===sector)&&(category==='all'||x.category===category)).slice(0,500);rows.innerHTML=items.map(x=>`<tr><td class="nowrap">${esc(new Date(x.at).toLocaleString('fr-CH'))}</td><td>${x.sector==='tech'?'Technique':'Administratif'}</td><td>${esc(x.category)}${x.count>1?' ('+x.count+')':''}</td><td>${esc(x.detail)}</td></tr>`).join('')||'<tr><td colspan="4">Aucune modification pour ce filtre.</td></tr>';};
+ $('journalSector').onchange=refresh;$('journalCategory').onchange=refresh;refresh();
+ $('journalClear').onclick=()=>{if(!confirm('Effacer définitivement tout le journal local ?'))return;state.auditLog=[];render()};
+ $('journalExport').onclick=()=>{const q=v=>'"'+String(v??'').replace(/"/g,'""')+'"';const data=[['Date','Secteur','Catégorie','Nombre','Détails'],...(state.auditLog||[]).map(x=>[x.at,x.sector,x.category,x.count,x.detail])].map(r=>r.map(q).join(';')).join('\r\n');const blob=new Blob(['\uFEFF'+data],{type:'text/csv;charset=utf-8'}),url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download='journal-planning.csv';link.click();setTimeout(()=>URL.revokeObjectURL(url),2000)};
+}
+function save(){try{localStorage.setItem('planning_service_technique_TEST_heures_2026v1',JSON.stringify(state))}catch(err){alert('Enregistrement impossible sur cet appareil : '+err.message)}}function render(){auditCapture();if(!state.sector)state.sector='tech';if(!state.admin)state.admin=adminSeed();if(!Array.isArray(state.preferred))state.preferred=seed().preferred;if(!Array.isArray(state.rules)||state.rules.length!==2||state.rules.some(r=>!Array.isArray(r)||r.length!==3))state.rules=defaultRules();if(!Number.isFinite(+state.year))state.year=new Date().getFullYear();state.year=+state.year;state.week=Math.max(1,Math.min(+state.week||1,weeks(state.year)));state.siteView=state.siteView==='all'?'all':(+state.siteView===1?1:0);save();$('sectors').innerHTML=['tech','admin'].map((k,i)=>`<button data-sector="${k}" class="${state.sector===k?'on':''}">${i?'Secteur administratif':'Service technique'}</button>`).join('');document.querySelectorAll('[data-sector]').forEach(b=>b.onclick=()=>{state.sector=b.dataset.sector;render()});if(state.sector==='admin'){renderAdmin();return}$('tabs').innerHTML=TABS.map(t=>`<button data-tab="${esc(t)}" class="${state.tab===t?'on':''}">${esc(t)}</button>`).join('');document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>{state.tab=b.dataset.tab;render()});$('app').innerHTML=({Planning:planning,Employés:employeesPage,'Vacances et absences':absencesPage,Missions:missionsPage,'Règles':rulesPage,'Piquets annuels':piquetsPage,Vigilance:vigilancePage,Journal:journalPage,Paramètres:settingsPage})[state.tab]();bind();bindJournal()}
+const iso=d=>[d.getFullYear(),String(d.getMonth()+1).padStart(2,'0'),String(d.getDate()).padStart(2,'0')].join('-');const fr=s=>s?String(s).split('-').reverse().join('.'):'—';function monday(y,w){let d=new Date(y,0,4,12);d.setDate(d.getDate()-((d.getDay()+6)%7)+(w-1)*7);return d}function weekDays(y,w){let m=monday(y,w);return Array.from({length:5},(_,i)=>{let d=new Date(m);d.setDate(m.getDate()+i);return iso(d)})}function weeks(y){return Math.round((monday(y+1,1)-monday(y,1))/604800000)}function weekId(y,w){return `${y}-S${String(w).padStart(2,'0')}`}function parseDay(s){return new Date(s+'T12:00:00')}function dayIndex(s){return (parseDay(s).getDay()+6)%7}function inWeek(a,y,w){return weekDays(y,w).some(d=>d>=a.from&&d<=a.to)}function closed(date,site){return state.holidays.some(h=>h.date===date&&(h.site==='all'||+h.site===site))}function absent(e,date,part){return state.absences.some(a=>a.employee===e.id&&a.from<=date&&a.to>=date&&(a.part==='both'||a.part===part))}function regularSite(e,date){const i=dayIndex(date);return Array.isArray(e.siteDays)&&[0,1].includes(Number(e.siteDays[i]))?Number(e.siteDays[i]):e.site}function employeeSite(e,date){const override=state.siteOverrides?.[key(date,e.id)];return override===0||override===1?override:regularSite(e,date)}function worksAt(e,site,date){return employeeSite(e,date)===site}function eligible(e,date,part,site,mission){return worksAt(e,site,date)&&!e.only&&e.days[dayIndex(date)]&&(!mission||e.skills.includes(mission))&&!closed(date,site)&&!absent(e,date,part)}function key(date,id){return date+'|'+id}function normalize(a){if(!a)return {am:'',pm:''};if('am'in a)return {am:a.am||'',pm:a.pm||''};return {am:a.main||'',pm:a.half?'':a.main||''}}function get(date,id){return normalize(state.assignments[key(date,id)])}function put(date,id,am,pm){if(am||pm)state.assignments[key(date,id)]={am,pm};else delete state.assignments[key(date,id)]}function absenceCount(site,y,w){return state.employees.filter(e=>weekDays(y,w).some(d=>worksAt(e,site,d)&&state.absences.some(a=>a.employee===e.id&&a.from<=d&&a.to>=d))).length}function target(site,y,w){let n=absenceCount(site,y,w);return {...(state.rules?.[site]?.[Math.min(n,2)]||defaultRules()[site][Math.min(n,2)]),n}}function countWeek(site,y,w){let count=Object.fromEntries(MISSIONS.map(m=>[m,0]));for(let d of weekDays(y,w))for(let e of state.employees.filter(e=>worksAt(e,site,d))){let a=get(d,e.id);for(let p of ['am','pm'])if(count[a[p]]!==undefined)count[a[p]]+=.5}return count}function format(n){return Number.isInteger(n)?String(n):String(n).replace('.',',')}
+function weekRows(y,w,site){return weekDays(y,w).map(d=>({date:d,entries:state.employees.filter(e=>worksAt(e,site,d)).map(e=>({e,a:get(d,e.id)}))}))}function sourcePattern(y,w){let pattern={};for(let d of weekDays(y,w)){let idx=dayIndex(d);for(let e of state.employees){let a=get(d,e.id);if(a.am||a.pm)pattern[e.id+'|'+idx]=a}}return pattern}function applyPattern(pattern,y,w){for(let d of weekDays(y,w))for(let e of state.employees){let a=pattern[e.id+'|'+dayIndex(d)]||{am:'',pm:''};let am=eligible(e,d,'am',employeeSite(e,d),a.am)?a.am:'',pm=eligible(e,d,'pm',employeeSite(e,d),a.pm)?a.pm:'';put(d,e.id,am,pm)}}
+// Each assignment occupies one half-day. Priority is curatif > livraison > désinfection > préventif.
+// Never schedule a person who is absent, on leave, not qualified, or assigned elsewhere.
+function generateWeek(y,w,site,pattern=null){
+ const ds=weekDays(y,w),staff=state.employees.filter(e=>!e.only&&ds.some(d=>worksAt(e,site,d))),quota=target(site,y,w),a={};
+ // Les missions personnalisées sont réservées avant la génération automatique.
+ for(const d of ds)for(const e of staff){
+   const existing=pattern?.[e.id+'|'+dayIndex(d)]||get(d,e.id);
+   a[key(d,e.id)]={am:'',pm:''};
+   for(const p of ['am','pm'])if(state.customMissions.some(m=>m.id===existing[p])&&eligible(e,d,p,site,existing[p]))a[key(d,e.id)][p]=existing[p];
+ }
+ const counts=Object.fromEntries(staff.map(e=>[e.id,Object.fromEntries(MISSIONS.map(m=>[m,0]))]));
+ const disrupted=quota.n>0||ds.some(d=>closed(d,site));
+ const fav=staff.find(e=>e.id===state.preferred[site]?.id);
+ const prefLimit=Math.min(Number(state.preferred[site]?.days)||0,quota.livraison)*2;
+ const can=(e,d,p,m)=>!!a[key(d,e.id)]&&!a[key(d,e.id)][p]&&eligible(e,d,p,site,m);
+ const putSlot=(e,d,p,m)=>{a[key(d,e.id)][p]=m;counts[e.id][m]++};
+ const used=(d,p,m)=>staff.some(e=>a[key(d,e.id)]?.[p]===m);
+ const availableDay=(e,d,m)=>can(e,d,'am',m)&&can(e,d,'pm',m);
+ const score=(e,d,m)=>{
+   const x=a[key(d,e.id)],other=x.am||x.pm;
+   const yesterday=ds.indexOf(d)>0?ds[ds.indexOf(d)-1]:null;
+   const prev=yesterday&&a[key(yesterday,e.id)];
+   let s=counts[e.id][m]*25+(prev&&(prev.am===m||prev.pm===m)?14:0)+(e.rate<100?2:0)+staff.indexOf(e)*.01;
+   if(pattern?.[e.id+'|'+dayIndex(d)]?.am===m)s-=15;
+   if(m==='livraison'&&e.id===fav?.id&&counts[e.id].livraison<prefLimit)s-=1000;
+   if(other&&other!==m)s+=100; // Keep a person's day on one mission whenever feasible.
+   return s;
+ };
+ const reserveDelivery=(e,d)=>e.id===fav?.id&&prefLimit>counts[e.id].livraison&&availableDay(e,d,'livraison')&&staff.some(x=>x.id!==e.id&&availableDay(x,d,'curatif'));
+ // 1. Curatif: prefer one person for the entire day, with the delivery-priority employee protected if feasible.
+ for(const d of ds.slice(0,Math.round(quota.curatif))){if(closed(d,site))continue;
+   let choices=staff.filter(e=>availableDay(e,d,'curatif'));
+   choices.sort((x,z)=>(reserveDelivery(x,d)?10000:0)+score(x,d,'curatif')-(reserveDelivery(z,d)?10000:0)-score(z,d,'curatif'));
+   if(choices.length){putSlot(choices[0],d,'am','curatif');putSlot(choices[0],d,'pm','curatif');continue}
+   // A half-day absence may force two different curatif technicians.
+   for(const p of ['am','pm']){
+     let candidates=staff.filter(e=>can(e,d,p,'curatif'));
+     candidates.sort((x,z)=>(reserveDelivery(x,d)?10000:0)+score(x,d,'curatif')-(reserveDelivery(z,d)?10000:0)-score(z,d,'curatif'));
+     if(candidates.length)putSlot(candidates[0],d,p,'curatif');
+   }
+ }
+ // 2. Delivery: first full days, particularly for the designated delivery technician.
+ let left=Math.round(quota.livraison*2);
+ const deliveryDays=ds.filter(d=>!closed(d,site));
+ for(const d of deliveryDays){if(left<2)break;
+   const candidates=staff.filter(e=>availableDay(e,d,'livraison'));
+   candidates.sort((x,z)=>score(x,d,'livraison')-score(z,d,'livraison'));
+   if(candidates.length){putSlot(candidates[0],d,'am','livraison');putSlot(candidates[0],d,'pm','livraison');left-=2}
+ }
+ // With absences only, permit splitting delivery into half-days to reach the required quota.
+ if(disrupted)for(const d of deliveryDays)for(const p of ['am','pm']){
+   if(left<=0)break;if(used(d,p,'livraison'))continue;
+   const candidates=staff.filter(e=>can(e,d,p,'livraison')).sort((x,z)=>score(x,d,'livraison')-score(z,d,'livraison'));
+   if(candidates.length){putSlot(candidates[0],d,p,'livraison');left--}
+ }
+ // 3. Disinfection: allocate as many complete days as possible; the remaining 0.5 day is unavoidable.
+ let remaining=Math.round(quota.desinfection*2);
+ for(const d of ds){if(remaining<2||closed(d,site))continue;
+   const candidates=staff.filter(e=>availableDay(e,d,'desinfection')).sort((x,z)=>score(x,d,'desinfection')-score(z,d,'desinfection'));
+   if(candidates.length){putSlot(candidates[0],d,'am','desinfection');putSlot(candidates[0],d,'pm','desinfection');remaining-=2}
+ }
+ // Use one half-day (or more if absences prevent full days).
+ for(const d of ds)for(const p of ['am','pm']){
+   if(remaining<=0||closed(d,site)||used(d,p,'desinfection'))continue;
+   const candidates=staff.filter(e=>can(e,d,p,'desinfection')).sort((x,z)=>score(x,d,'desinfection')-score(z,d,'desinfection'));
+   if(candidates.length){putSlot(candidates[0],d,p,'desinfection');remaining--}
+ }
+ // 4. Preventive SAV fills every remaining available slot.
+ for(const d of ds)for(const e of staff)for(const p of ['am','pm'])if(can(e,d,p,'preventif'))putSlot(e,d,p,'preventif');
+ for(const d of ds)for(const e of staff){if(!worksAt(e,site,d))continue;const x=a[key(d,e.id)];put(d,e.id,x.am,x.pm)}
+ return countWeek(site,y,w);
+}
+function generateOne(){let y=state.year,w=state.week;if(!confirm(`Générer la semaine ${w}/${y} pour ${state.siteView==='all'?'les deux succursales':SITES[+state.siteView]} selon les quotas ? Les affectations de cette semaine seront remplacées.`))return;for(let site of (state.siteView==='all'?[0,1]:[+state.siteView]))generateWeek(y,w,site);render()}
+function propagate(){let y=state.year,w=state.week,limit=weeks(y);if(w===limit){alert('Cette semaine est la dernière de l’année.');return}if(!confirm(`Reproduire la semaine ${w}/${y} sur les semaines ${w+1} à ${limit} ? Les semaines antérieures et la semaine ${w} restent inchangées. Les semaines avec absences seront adaptées.`))return;let pattern=sourcePattern(y,w);state.references[y]={from:w,pattern};for(let next=w+1;next<=limit;next++){let dates=weekDays(y,next);for(let site of (state.siteView==='all'?[0,1]:[+state.siteView])){let disrupted=absenceCount(site,y,next)>0||dates.some(d=>closed(d,site));if(disrupted)generateWeek(y,next,site,pattern);else{for(let d of dates)for(let e of state.employees.filter(e=>worksAt(e,site,d))){let x=pattern[e.id+'|'+dayIndex(d)]||{am:'',pm:''};put(d,e.id,eligible(e,d,'am',site,x.am)?x.am:'',eligible(e,d,'pm',site,x.pm)?x.pm:'')}}}}render();alert('Les semaines suivantes ont été générées. Les semaines précédentes sont conservées.')}
+function planningSingle(site){let y=state.year,w=state.week,ds=weekDays(y,w),staff=state.employees.filter(e=>e.site===site||ds.some(d=>worksAt(e,site,d))),q=target(site,y,w),c=countWeek(site,y,w);return `<div class="card"><div class="toolbar"><label>Année <input id="year" type="number" min="2020" max="2100" value="${y}" style="width:100px"></label><label>Semaine <select id="week">${Array.from({length:weeks(y)},(_,i)=>`<option value="${i+1}" ${w===i+1?'selected':''}>${i+1}</option>`).join('')}</select></label><button id="previous">←</button><button id="next">→</button><label>Succursale <select id="site">${`<option value="all" ${state.siteView==='all'?'selected':''}>Les deux succursales</option>`+SITES.map((s,i)=>`<option value="${i}" ${state.siteView===i?'selected':''}>${s}</option>`).join('')}</select></label></div><div class="toolbar"><button id="generate" class="primary">Générer cette semaine selon les règles</button><button id="propagate">Reproduire cette semaine sur les suivantes</button></div><p class="muted">Semaine du ${fr(ds[0])} au ${fr(ds[4])}. ${q.n} employé(s) en vacances/absence dans cette succursale. Objectifs actifs pour ce site : curatif ${format(q.curatif)} j, livraison ${format(q.livraison)} j, désinfection ${format(q.desinfection)} j. Priorités : curatif → livraison → désinfection → préventif. Journées entières privilégiées ; demi-journées mixtes seulement en cas d’absence ou de vacances.</p></div><div class="card scroll"><h2>${esc(SITES[site])} — semaine ${w} / ${y}</h2><table><thead><tr><th>Employé</th>${ds.map((d,i)=>`<th>${DAYS[i]}<br>${fr(d)}</th>`).join('')}</tr></thead><tbody>${staff.map(e=>`<tr><td><b>${esc(e.name)}</b><br><span class="muted">${e.rate}%</span></td>${ds.map(d=>{let a=get(d,e.id);return `<td class="daycell">${['am','pm'].map((p,i)=>{let unavailable=!worksAt(e,site,d)||absent(e,d,p)||!e.days[dayIndex(d)]||closed(d,site)||e.only;return `<button data-edit="${esc(key(d,e.id))}" data-part="${p}" class="${!worksAt(e,site,d)?'travel':unavailable?'vac':CLS[a[p]]||''}" title="Modifier ${i?'après-midi':'matin'}" ${!worksAt(e,site,d)?'disabled':''}>${i?'PM':'AM'} : ${esc(assignmentCaption(e,d,p,site,unavailable,a[p]))}</button>`}).join('')}</td>`}).join('')}</tr>`).join('')}</tbody></table></div><div class="card"><h2>Totaux hebdomadaires — ${esc(SITES[site])}</h2><div class="flex">${['curatif','livraison','desinfection','preventif'].map(m=>`<div class="stat"><span>${LABEL[m]}</span><b>${format(c[m])} j</b><span class="muted">${m==='preventif'?'Temps restant':`Objectif ${format(q[m])} j`}</span></div>`).join('')}</div>${['curatif','livraison','desinfection'].filter(m=>c[m]<q[m]).map(m=>`<div class="danger">${LABEL[m]} : manque ${format(q[m]-c[m])} jour(s). Vérifier Vigilance.</div>`).join('')}</div>`}
+function planning(){let sites=state.siteView==='all'?[0,1]:[+state.siteView];return sites.map((site,i)=>{let html=planningSingle(site);if(i>0){let first=html.indexOf('</div><div class="card scroll">');if(first>=0)html=html.slice(first+6)}return html}).join('')}
+function employeesPage(){return `<div class="card"><h2>Employés</h2><p class="muted">Un employé peut travailler dans les deux succursales selon les jours (ex. quatre jours à La Chaux-de-Fonds et un jour à Bassecourt). Les affectations existantes de cet employé sont retirées pour éviter des missions dans l’ancienne succursale.</p><form id="addEmployee" class="grid"><div class="field"><label>Nom</label><input name="name" required></div><div class="field"><label>Succursale</label><select name="site">${SITES.map((s,i)=>`<option value="${i}">${s}</option>`).join('')}</select></div><div class="field"><label>Succursale par jour (facultatif)</label><span class="muted">0 = La Chaux-de-Fonds, 1 = Bassecourt. Exemple : 00001 pour 4 jours à La Chaux-de-Fonds et vendredi à Bassecourt.</span><input name="siteDays" placeholder="Ex. 00001" pattern="[01]{5}" maxlength="5"></div><div class="field"><label>Taux d’activité (%)</label><input type="number" name="rate" value="100" min="10" max="100"></div><div class="field"><label>Jours de travail</label><div>${DAYS.map((d,i)=>`<label class="small"><input type="checkbox" name="d${i}" checked> ${d.slice(0,3)} </label>`).join('')}</div></div><div class="field"><label>Missions autorisées</label>${MISSIONS.map(m=>`<label class="small"><input type="checkbox" name="s_${m}" checked> ${LABEL[m]}</label>`).join('')}<label class="small"><input type="checkbox" name="piquet" checked> SAV piquet</label><label class="small"><input type="checkbox" name="only"> Piquet uniquement</label></div><div class="field"><label>&nbsp;</label><button class="primary">Ajouter</button></div></form></div><div class="card scroll"><table><thead><tr><th>Employé</th><th>Succursale</th><th>Présence</th><th>Habilitations</th><th></th></tr></thead><tbody>${state.employees.map(e=>`<tr><td><b>${esc(e.name)}</b></td><td>${Array.isArray(e.siteDays)?e.siteDays.map((v,i)=>e.days[i]?DAYS[i].slice(0,3)+': '+(v===0?'CDF':'Bassecourt'):null).filter(Boolean).join(', '):SITES[e.site]}</td><td>${e.rate}% · ${e.days.map((x,i)=>x?DAYS[i].slice(0,3):'').filter(Boolean).join(', ')}</td><td>${e.skills.map(m=>`<span class="pill">${esc(LABEL[m]||m)}</span>`).join('')}${e.piquet?'<span class="pill">Piquet</span>':''}${e.only?'<span class="pill">Piquet uniquement</span>':''}</td><td><button data-emp="${esc(e.id)}">Modifier</button> <button class="red" data-delete="${esc(e.id)}">Supprimer</button></td></tr>`).join('')}</tbody></table></div>`}
+function absencesPage(){return `<div class="card"><h2>Vacances et absences</h2><form id="addAbsence" class="grid"><div class="field"><label>Employé</label><select name="employee">${state.employees.map(e=>`<option value="${esc(e.id)}">${esc(e.name)} — ${SITES[e.site]}</option>`).join('')}</select></div><div class="field"><label>Type</label><select name="type"><option value="vacances">Vacances</option><option value="absence">Absence</option></select></div><div class="field"><label>Du</label><input name="from" type="date" required></div><div class="field"><label>Au</label><input name="to" type="date" required></div><div class="field"><label>Durée quotidienne</label><select name="part"><option value="both">Journée entière</option><option value="am">Matin</option><option value="pm">Après-midi</option></select></div><div class="field"><label>&nbsp;</label><button class="primary">Enregistrer</button></div></form><p class="muted">Les dates enregistrées sont affichées au format suisse JJ.MM.AAAA. Une absence interdit toute mission sur les demi-journées concernées et retire les affectations en conflit.</p></div><div class="card scroll"><h3>Vacances et absences enregistrées</h3><table><thead><tr><th>Employé</th><th>Type</th><th>Du</th><th>Au</th><th>Créneau</th><th></th></tr></thead><tbody>${state.absences.map(a=>`<tr><td>${esc(state.employees.find(e=>e.id===a.employee)?.name||'Employé supprimé')}</td><td>${a.type==='vacances'?'Vacances':'Absence'}</td><td>${fr(a.from)}</td><td>${fr(a.to)}</td><td>${a.part==='both'?'Journée':a.part==='am'?'Matin':'Après-midi'}</td><td><button class="red" data-delabs="${esc(a.id)}">Supprimer</button></td></tr>`).join('')}</tbody></table></div><div class="card"><h3>Jours fériés et fermetures</h3><form id="addHoliday" class="toolbar"><input type="date" name="date" required><select name="site"><option value="all">Deux sites</option>${SITES.map((s,i)=>`<option value="${i}">${s}</option>`).join('')}</select><input name="label" placeholder="Motif" required><button>Ajouter</button></form>${state.holidays.map(h=>`<p>${fr(h.date)} · ${esc(h.label)} · ${h.site==='all'?'Deux sites':SITES[+h.site]} <button class="red" data-delholiday="${esc(h.id)}">Retirer</button></p>`).join('')}</div>`}
+function rulesPage(){return `<div class="card"><h2>Règles de planification par succursale</h2><p class="muted">Choisis les objectifs hebdomadaires pour chaque site et pour 0, 1 ou 2 employés absents ou plus. Une demi-journée = 0,5 jour. Les changements sont enregistrés sur cet appareil et s'appliquent aux prochaines générations, sans modifier les plannings existants.</p><form id="rulesForm"><div class="ok">Modifie les valeurs, puis appuie sur « Enregistrer les règles ». Les changements seront appliqués lors de la prochaine génération de semaine.</div>${SITES.map((site,i)=>`<h3>${esc(site)}</h3><div class="scroll"><table><thead><tr><th>Mission</th><th>0 absent</th><th>1 absent</th><th>2 absents ou plus</th></tr></thead><tbody>${[['curatif','SAV curatif'],['livraison','Livraison'],['desinfection','Désinfection']].map(([m,label])=>`<tr><td><b>${label}</b></td>${[0,1,2].map(n=>`<td><input aria-label="${label} ${site} ${n} absents" name="r_${i}_${n}_${m}" type="number" min="0" max="5" step="${m==='curatif'?'1':'0.5'}" required value="${state.rules[i][n][m]}" style="width:85px"></td>`).join('')}</tr>`).join('')}<tr><td>SAV préventif</td><td colspan="3">Tout le temps restant</td></tr></tbody></table></div>`).join('')}<p class="muted">Le curatif reste prioritaire, puis les livraisons, la désinfection et le préventif. Les objectifs de curatif sont des journées complètes réparties à partir du lundi ; la valeur habituelle est 5 jours pour une couverture du lundi au vendredi.</p><div class="toolbar"><button class="primary" type="submit">Enregistrer les règles</button><button type="button" id="rulesGenerate">Enregistrer puis appliquer : voir Planning</button></div><p id="rulesStatus" class="muted">Règles actuellement enregistrées et affichées ci-dessus.</p></form></div>`}
+function missionsPage(){return customMissionsPage()}
+function piquetsPage(){let y=state.year,n=weeks(y);return `<div class="card"><h2>SAV piquet annuel · ${y}</h2><p class="muted">Un seul technicien de piquet pour les deux sites. Les vacances et absences doivent être contrôlées ; les conflits apparaissent dans Vigilance.</p><button id="genPiquets" class="primary">Générer les piquets manquants</button></div><div class="card scroll"><table><thead><tr><th>Semaine</th><th>Du</th><th>Au</th><th>Technicien</th></tr></thead><tbody>${Array.from({length:n},(_,i)=>{let w=i+1,d=weekDays(y,w),id=weekId(y,w);return `<tr><td>${w}</td><td>${fr(d[0])}</td><td>${fr(iso(new Date(parseDay(d[4]).getTime()+2*86400000)))}</td><td><select data-piquet="${id}"><option value="">— Non attribué —</option>${state.employees.filter(e=>e.piquet).map(e=>`<option value="${esc(e.id)}" ${state.piquets[id]===e.id?'selected':''}>${esc(e.name)}</option>`).join('')}</select></td></tr>`}).join('')}</tbody></table></div>`}
+function issues(){let out=[],y=state.year;for(let w=1;w<=weeks(y);w++){let ds=weekDays(y,w);for(let site=0;site<2;site++){let has=ds.some(d=>state.employees.some(e=>worksAt(e,site,d)&&state.assignments[key(d,e.id)]));if(!has)continue;let c=countWeek(site,y,w),q=target(site,y,w);for(let m of ['curatif','livraison','desinfection'])if(c[m]<q[m])out.push(`Semaine ${w}, ${SITES[site]} : ${LABEL[m]} ${format(c[m])} j / ${format(q[m])} j.`);for(let d of ds){if(closed(d,site))continue;for(let p of ['am','pm']){let n=state.employees.filter(e=>worksAt(e,site,d)&&get(d,e.id)[p]==='curatif').length;if(ds.indexOf(d)<Math.round(q.curatif)&&n!==1)out.push(`${fr(d)}, ${SITES[site]} : ${n} personne(s) en curatif ${p==='am'?'le matin':'l’après-midi'} (attendu : 1).`);for(let m of ['livraison','desinfection']){let z=state.employees.filter(e=>worksAt(e,site,d)&&get(d,e.id)[p]===m).length;if(z>1)out.push(`${fr(d)}, ${SITES[site]} : ${z} personnes en ${LABEL[m]} simultanément.`)}}}}}for(let [k,v] of Object.entries(state.assignments)){let [d,id]=k.split('|'),e=state.employees.find(x=>x.id===id);if(!d.startsWith(y+'-'))continue;if(!e){out.push(`${fr(d)} : mission attribuée à un employé supprimé.`);continue}let a=normalize(v);for(let p of ['am','pm'])if(a[p]&&!eligible(e,d,p,employeeSite(e,d),a[p]))out.push(`${fr(d)} : ${e.name} affecté malgré une indisponibilité ou une habilitation manquante (${p}).`)}for(let w=1;w<=weeks(y);w++){let id=weekId(y,w),e=state.employees.find(x=>x.id===state.piquets[id]);if(!e){out.push(`Semaine ${w} : piquet non attribué.`);continue}let mon=monday(y,w);for(let i=0;i<7;i++){let d=new Date(mon);d.setDate(mon.getDate()+i);let day=iso(d);if(absent(e,day,'am')||absent(e,day,'pm')){out.push(`Semaine ${w} : piquet ${e.name} en conflit avec une absence le ${fr(day)}.`);break}}}return out}
+function vigilancePage(){let arr=issues();return `<div class="card"><h2>Vigilance · ${state.year}</h2><p>${arr.length} alerte(s) détectée(s) sur les semaines enregistrées et les piquets.</p></div><div class="card">${arr.length?arr.slice(0,200).map(t=>`<div class="warn">${esc(t)}</div>`).join(''):'<div class="ok">Aucune anomalie détectée sur les semaines déjà planifiées.</div>'}${arr.length>200?'<p>Affichage limité aux 200 premières alertes.</p>':''}</div>`}
+function settingsPage(){return `<div class="card"><h2>Paramètres et sauvegarde</h2><div class="toolbar"><button id="export">Exporter JSON</button><button id="import">Importer JSON</button><input type="file" id="file" accept="application/json" hidden><button id="reset" class="red">Réinitialiser</button></div><p class="muted">Cette version enregistre les données dans ce navigateur uniquement. Les données de l'ancienne démonstration ne sont pas écrasées : importez une sauvegarde compatible si nécessaire.</p></div><div class="card"><h2>Accès employés</h2><div class="warn">Connexion administrateur / employés et synchronisation Supabase non implémentées dans cette version. Ne pas publier de données sensibles.</div></div>`}
+function bind(){installExtraControls();let x;if(x=$('year'))x.onchange=()=>{let y=+$('year').value;if(y<2020||y>2100)return;state.year=y;state.week=Math.min(state.week,weeks(y));render()};if(x=$('week'))x.onchange=()=>{state.week=+$('week').value;render()};if(x=$('site'))x.onchange=()=>{state.siteView=$('site').value==='all'?'all':+$('site').value;render()};if(x=$('previous'))x.onclick=()=>{if(state.week>1)state.week--;else{state.year--;state.week=weeks(state.year)}render()};if(x=$('next'))x.onclick=()=>{if(state.week<weeks(state.year))state.week++;else{state.year++;state.week=1}render()};if(x=$('generate'))x.onclick=generateOne;if(x=$('propagate'))x.onclick=propagate;
+document.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>{let [d,id]=b.dataset.edit.split('|'),p=b.dataset.part,e=state.employees.find(e=>e.id===id),site=employeeSite(e,d);if(!e)return;if(!eligible(e,d,p,site)){alert('Cet employé est absent, en vacances ou indisponible sur ce créneau. Aucune mission possible.');return}let current=get(d,id),opts=['Libre',...MISSIONS.map(m=>LABEL[m])],v=prompt('Mission de '+e.name+' — '+fr(d)+' — '+(p==='am'?'matin':'après-midi')+'\n'+opts.map((name,i)=>i+' = '+name).join('\n'),String(Math.max(0,MISSIONS.indexOf(current[p])+1)));if(v===null||!/(?:^0$|^[1-9][0-9]*$)/.test(v)||+v>MISSIONS.length)return;let m=+v?MISSIONS[+v-1]:'';if(m&&!eligible(e,d,p,site,m)){alert('Cet employé n’est pas habilité pour cette mission.');return}if(['curatif','livraison','desinfection'].includes(m)){let other=state.employees.filter(x=>worksAt(x,site,d)&&x.id!==id&&get(d,x.id)[p]===m);if(other.length){alert(`${LABEL[m]} déjà attribué sur ce créneau à ${other.map(x=>x.name).join(', ')}.`);return}}current[p]=m;put(d,id,current.am,current.pm);render()});
+if(x=$('addEmployee'))x.onsubmit=ev=>{ev.preventDefault();let f=new FormData(ev.currentTarget),name=String(f.get('name')||'').trim();if(!name)return;state.employees.push({id:'e'+Date.now(),name,site:+f.get('site'),siteDays:/^[01]{5}$/.test(String(f.get('siteDays')||''))?String(f.get('siteDays')).split('').map(Number):null,rate:+f.get('rate'),days:DAYS.map((_,i)=>f.has('d'+i)?1:0),skills:MISSIONS.filter(m=>f.has('s_'+m)),piquet:f.has('piquet'),only:f.has('only')});render()};
+document.querySelectorAll('[data-emp]').forEach(b=>b.onclick=()=>{let e=state.employees.find(e=>e.id===b.dataset.emp);if(!e)return;let name=prompt('Nom',e.name);if(name===null||!name.trim())return;let site=prompt('Succursale : 0 = La Chaux-de-Fonds, 1 = Bassecourt',String(e.site));if(!['0','1'].includes(site))return;let siteDays=prompt('Succursale pour chaque jour du lundi au vendredi : 0 = La Chaux-de-Fonds, 1 = Bassecourt. Exemple 00001 = vendredi à Bassecourt.',(Array.isArray(e.siteDays)?e.siteDays:Array(5).fill(+site)).join(''));if(siteDays===null||!/^[01]{5}$/.test(siteDays))return;let rate=prompt('Taux d’activité (%)',String(e.rate));if(rate===null||!(+rate>=10&&+rate<=100))return;let days=prompt('Jours habituels lundi à vendredi (1 = présent, 0 = absent)',e.days.join(''));if(days===null||!/^[01]{5}$/.test(days))return;let skills=prompt('Missions autorisées (codes séparés par virgules) : '+MISSIONS.map(m=>m+' = '+LABEL[m]).join(', '),e.skills.join(', '));if(skills===null)return;let next=skills.split(',').map(s=>s.trim().toLowerCase()).filter(m=>MISSIONS.includes(m));let piquet=confirm('Habilité au SAV piquet ?');let only=piquet&&confirm('Piquet uniquement (aucune mission quotidienne) ?');let changed=e.site!==+site||JSON.stringify(e.siteDays||Array(5).fill(e.site))!==JSON.stringify(siteDays.split('').map(Number));Object.assign(e,{name:name.trim(),site:+site,siteDays:siteDays.split('').map(Number),rate:+rate,days:days.split('').map(Number),skills:only?[]:next,piquet,only});if(changed){for(let k of Object.keys(state.assignments))if(k.endsWith('|'+e.id))delete state.assignments[k];for(let k of Object.keys(state.siteOverrides))if(k.endsWith('|'+e.id))delete state.siteOverrides[k];for(let y of Object.keys(state.references))delete state.references[y];for(let p of state.preferred)if(p.id===e.id)p.id='';alert('Répartition des succursales modifiée : les anciennes missions de cet employé ont été retirées. Régénérez les semaines concernées.')}render()});
+document.querySelectorAll('[data-delete]').forEach(b=>b.onclick=()=>{if(!confirm('Supprimer cet employé et ses affectations ?'))return;let id=b.dataset.delete;state.employees=state.employees.filter(e=>e.id!==id);for(let k of Object.keys(state.assignments))if(k.endsWith('|'+id))delete state.assignments[k];for(let k of Object.keys(state.siteOverrides))if(k.endsWith('|'+id))delete state.siteOverrides[k];render()});
+if(x=$('addAbsence'))x.onsubmit=ev=>{ev.preventDefault();let f=new FormData(ev.currentTarget),from=f.get('from'),to=f.get('to'),id=f.get('employee'),part=f.get('part');if(from>to){alert('La date de fin doit suivre la date de début.');return}state.absences.push({id:'a'+Date.now(),employee:id,type:f.get('type'),from,to,part});for(let k of Object.keys(state.assignments)){let [d,eid]=k.split('|');if(eid!==id||d<from||d>to)continue;let a=get(d,id);if(part==='both'||part==='am')a.am='';if(part==='both'||part==='pm')a.pm='';put(d,id,a.am,a.pm)}render();alert('Absence enregistrée. Les missions incompatibles ont été retirées. Regénérez les semaines concernées pour répartir les missions et vérifiez Vigilance.')};
+document.querySelectorAll('[data-delabs]').forEach(b=>b.onclick=()=>{state.absences=state.absences.filter(a=>a.id!==b.dataset.delabs);render()});if(x=$('addHoliday'))x.onsubmit=ev=>{ev.preventDefault();let f=new FormData(ev.currentTarget),date=f.get('date'),site=f.get('site');state.holidays.push({id:'h'+Date.now(),date,site,label:f.get('label')});for(let e of state.employees)if(site==='all'||worksAt(e,+site,date))delete state.assignments[key(date,e.id)];render()};document.querySelectorAll('[data-delholiday]').forEach(b=>b.onclick=()=>{state.holidays=state.holidays.filter(h=>h.id!==b.dataset.delholiday);render()});
+if(x=$('rulesForm'))x.onsubmit=ev=>{ev.preventDefault();const f=new FormData(ev.currentTarget);const rules=defaultRules();for(let i=0;i<2;i++)for(let n=0;n<3;n++)for(let m of ['curatif','livraison','desinfection']){const v=Number(f.get(`r_${i}_${n}_${m}`));if(!Number.isFinite(v)||v<0||v>5||Math.round(v*2)!==v*2||(m==='curatif'&&!Number.isInteger(v))){alert('Valeur invalide : utilise 0 à 5 jours, par demi-journées (curatif : journées entières).');return}rules[i][n][m]=v}state.rules=rules;save();render();alert('Règles enregistrées pour La Chaux-de-Fonds et Bassecourt. Pour les appliquer, génère à nouveau la semaine voulue dans Planning.')};if(x=$('rulesGenerate'))x.onclick=()=>{const form=$('rulesForm');if(!form.reportValidity())return;form.requestSubmit();state.tab='Planning';render();};if(x=$('preferred'))x.onsubmit=ev=>{ev.preventDefault();let f=new FormData(ev.currentTarget);state.preferred=[0,1].map(i=>({id:String(f.get('p'+i)||''),days:Number(f.get('n'+i)||0)}));save();render();alert('Préférences de livraison enregistrées pour les deux succursales.')};if(x=$('genPiquets'))x.onclick=()=>{if(!confirm('Générer les piquets manquants ?'))return;let elig=state.employees.filter(e=>e.piquet),last='';if(!elig.length){alert('Aucun employé habilité au piquet.');return}let counts={};for(let e of elig)counts[e.id]=Object.values(state.piquets).filter(id=>id===e.id).length;for(let w=1;w<=weeks(state.year);w++){let k=weekId(state.year,w);if(state.piquets[k]){last=state.piquets[k];continue}let m=monday(state.year,w),eligibleP=elig.filter(e=>{for(let i=0;i<7;i++){let d=new Date(m);d.setDate(m.getDate()+i);let s=iso(d);if(absent(e,s,'am')||absent(e,s,'pm'))return false}return true});eligibleP.sort((a,b)=>(a.id===last?100:0)+counts[a.id]-(b.id===last?100:0)-counts[b.id]);let e=eligibleP[0];if(e){state.piquets[k]=e.id;counts[e.id]++;last=e.id}}render()};document.querySelectorAll('[data-piquet]').forEach(s=>s.onchange=()=>{if(s.value)state.piquets[s.dataset.piquet]=s.value;else delete state.piquets[s.dataset.piquet];render()});
+if(x=$('export'))x.onclick=()=>{let blob=new Blob([JSON.stringify(state,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='planning-service-technique-sauvegarde.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),2000)};if(x=$('import'))x.onclick=()=>$('file').click();if(x=$('file'))x.onchange=async ev=>{let f=ev.currentTarget.files[0];if(!f)return;try{let s=JSON.parse(await f.text());if(!Array.isArray(s.employees)||!s.assignments||!Array.isArray(s.absences))throw Error('Format incompatible');if(confirm('Remplacer les données actuelles par cette sauvegarde ?')){state={...seed(),...s};render()}}catch(e){alert('Import impossible : '+e.message)}};if(x=$('reset'))x.onclick=()=>{if(confirm('Effacer toutes les données de cette version sur cet appareil ?')){state=seed();render()}}}
+
+// Administrative sector: independent staff, tasks, absences, rules and assignments.
+function adminSeed(){return {tab:'Planning',employees:[],tasks:[],absences:[],assignments:{},rules:[{},{}],siteView:'all',references:{}}}
+const adminTabs=['Planning','Employés','Tâches','Vacances et absences','Règles','Vigilance','Journal'];
+const adm=()=>state.admin;
+function aSite(e,d){let i=dayIndex(d);return Array.isArray(e.siteDays)&&[0,1].includes(+e.siteDays[i])?+e.siteDays[i]:+e.site}
+function aAbsent(e,d,p){return adm().absences.some(a=>a.employee===e.id&&a.from<=d&&a.to>=d&&(a.part==='both'||a.part===p))}
+function aAvailable(e,d,p,site,task){return e.days[dayIndex(d)]&&aSite(e,d)===site&&!aAbsent(e,d,p)&&(!task||e.skills.includes(task))&&!closed(d,site)}
+function aGet(d,id){return normalize(adm().assignments[key(d,id)])}
+function aPut(d,id,am,pm){if(am||pm)adm().assignments[key(d,id)]={am,pm};else delete adm().assignments[key(d,id)]}
+function aStaff(site,ds){return adm().employees.filter(e=>ds.some(d=>aSite(e,d)===site))}
+function aTarget(site,y,w){let n=new Set(adm().absences.filter(a=>inWeek(a,y,w)).map(a=>a.employee));let count=adm().employees.filter(e=>n.has(e.id)&&weekDays(y,w).some(d=>aSite(e,d)===site)).length;return {n:count,values:adm().rules[site]||{}}}
+function aTotals(site,y,w){let r={};for(let d of weekDays(y,w))for(let e of adm().employees)if(aSite(e,d)===site){let x=aGet(d,e.id);for(let p of ['am','pm'])if(x[p])r[x[p]]=(r[x[p]]||0)+.5}return r}
+function aTaskLabel(id){return !id?'Libre':(adm().tasks.find(t=>t.id===id)?.name||'Tâche supprimée')}
+function aGenerate(y,w,site,pattern=null){let ds=weekDays(y,w),staff=aStaff(site,ds),q=aTarget(site,y,w),totals={};let used={};for(let d of ds)for(let e of staff)if(aSite(e,d)===site){aPut(d,e.id,'','');used[key(d,e.id)]={am:'',pm:''}}
+let tasks=[...adm().tasks].sort((a,b)=>a.priority-b.priority);
+for(let t of tasks){let goal=Math.max(0,Math.round((+(q.values[t.id]?.[Math.min(q.n,2)]??t.days??0))*2));let allocated=0;
+// Fill full days first, then half days, with no two staff on the same task at once.
+for(let pass of [2,1])for(let d of ds){if(allocated>=goal)break;let slots=pass===2?['am','pm']:[(ds.indexOf(d)+allocated)%2===0?'am':'pm'];if(pass===2&&allocated+2>goal)continue;
+let candidates=staff.filter(e=>slots.slice(0,pass).every(p=>used[key(d,e.id)]&&!used[key(d,e.id)][p]&&aAvailable(e,d,p,site,t.id)));
+candidates=candidates.filter(e=>slots.slice(0,pass).every(p=>!staff.some(x=>used[key(d,x.id)]?.[p]===t.id)));
+candidates.sort((a,b)=>{let ac=ds.reduce((n,dd)=>n+['am','pm'].filter(p=>used[key(dd,a.id)]?.[p]===t.id).length,0),bc=ds.reduce((n,dd)=>n+['am','pm'].filter(p=>used[key(dd,b.id)]?.[p]===t.id).length,0);let ap=pattern?.[a.id+'|'+dayIndex(d)];let bp=pattern?.[b.id+'|'+dayIndex(d)];return (ac*10-(ap?.am===t.id?4:0))-(bc*10-(bp?.am===t.id?4:0))});
+if(candidates.length){let e=candidates[0];for(let p of slots.slice(0,pass))used[key(d,e.id)][p]=t.id;allocated+=pass}}
+totals[t.id]=allocated/2;
+}
+for(let d of ds)for(let e of staff)if(used[key(d,e.id)]){let x=used[key(d,e.id)];aPut(d,e.id,x.am,x.pm)}return totals}
+function aPattern(y,w){let r={};for(let d of weekDays(y,w))for(let e of adm().employees){let x=aGet(d,e.id);if(x.am||x.pm)r[e.id+'|'+dayIndex(d)]=x}return r}
+function aPropagate(){let y=state.year,w=state.week,limit=weeks(y),sites=adm().siteView==='all'?[0,1]:[+adm().siteView];if(w===limit)return alert('Dernière semaine de l’année.');if(!confirm('Reproduire la semaine type sur toutes les semaines suivantes ? Les semaines avec vacances seront recalculées.'))return;let pattern=aPattern(y,w);for(let next=w+1;next<=limit;next++)for(let site of sites){let ds=weekDays(y,next),disrupted=adm().absences.some(a=>inWeek(a,y,next)&&adm().employees.some(e=>e.id===a.employee&&ds.some(d=>aSite(e,d)===site)))||ds.some(d=>closed(d,site));if(disrupted){aGenerate(y,next,site,pattern);continue}for(let d of ds)for(let e of adm().employees)if(aSite(e,d)===site){let x=pattern[e.id+'|'+dayIndex(d)]||{am:'',pm:''};aPut(d,e.id,aAvailable(e,d,'am',site,x.am)?x.am:'',aAvailable(e,d,'pm',site,x.pm)?x.pm:'')}}render()}
+function aPlanSite(site){let y=state.year,w=state.week,ds=weekDays(y,w),staff=aStaff(site,ds),q=aTarget(site,y,w),totals=aTotals(site,y,w);return `<div class="card scroll"><h2>${esc(SITES[site])} — semaine ${w}</h2><table><thead><tr><th>Employé</th>${ds.map((d,i)=>`<th>${DAYS[i]} ${fr(d)}</th>`).join('')}</tr></thead><tbody>${staff.map(e=>`<tr><td><b>${esc(e.name)}</b><div class="muted">${e.rate}%</div></td>${ds.map(d=>`<td class="daycell">${['am','pm'].map(p=>{let x=aGet(d,e.id),free=aAvailable(e,d,p,site);return `<button data-aedit="${esc(key(d,e.id))}" data-part="${p}" class="${free?'':'vac'}">${p.toUpperCase()} : ${free?esc(aTaskLabel(x[p])):'Absent / indisponible'}</button>`}).join('')}</td>`).join('')}</tr>`).join('')}</tbody></table></div><div class="card"><h3>Totaux — ${esc(SITES[site])}</h3><div class="flex">${adm().tasks.map(t=>{let goal=+(q.values[t.id]?.[Math.min(q.n,2)]??t.days??0),n=totals[t.id]||0;return `<div class="stat">${esc(t.name)}<b>${format(n)} j</b><span class="muted">Objectif ${format(goal)} j</span>${n<goal?'<span class="small">⚠ Objectif non atteint</span>':''}</div>`}).join('')}</div></div>`}
+function adminPlanning(){let y=state.year,w=state.week,ds=weekDays(y,w),site=adm().siteView;return `<div class="card"><div class="toolbar"><label>Année <input id="ayear" type="number" min="2020" max="2100" value="${y}" style="width:100px"></label><label>Semaine <select id="aweek">${Array.from({length:weeks(y)},(_,i)=>`<option value="${i+1}" ${w===i+1?'selected':''}>${i+1}</option>`).join('')}</select></label><button id="aprev">←</button><button id="anext">→</button><label>Succursale <select id="asite"><option value="all" ${site==='all'?'selected':''}>Les deux succursales</option>${SITES.map((s,i)=>`<option value="${i}" ${site===i?'selected':''}>${s}</option>`).join('')}</select></label></div><div class="toolbar"><button class="primary" id="agenerate">Générer la semaine</button><button id="apropagate">Reproduire sur les semaines suivantes</button></div><p class="muted">Du ${fr(ds[0])} au ${fr(ds[4])}. Tâches selon leurs priorités, compétences, quotas et vacances. Une tâche ne peut être attribuée qu'à une personne par demi-journée et par site.</p></div>${(site==='all'?[0,1]:[+site]).map(aPlanSite).join('')}`}
+function adminEmployees(){return `<div class="card"><h2>Employés administratifs</h2><form id="aaddemp" class="grid"><div class="field"><label>Nom</label><input name="name" required></div><div class="field"><label>Succursale principale</label><select name="site">${SITES.map((s,i)=>`<option value="${i}">${s}</option>`).join('')}</select></div><div class="field"><label>Taux (%)</label><input name="rate" type="number" min="10" max="100" value="100"></div><div class="field"><label>Jours travaillés</label>${DAYS.map((d,i)=>`<label><input type="checkbox" name="d${i}" checked> ${d}</label>`).join('')}</div><div class="field"><label>Tâches autorisées</label>${adm().tasks.map(t=>`<label><input type="checkbox" name="s_${esc(t.id)}" checked> ${esc(t.name)}</label>`).join('')}</div><div class="field"><label>&nbsp;</label><button class="primary">Ajouter</button></div></form></div><div class="card scroll"><table><thead><tr><th>Employé</th><th>Site / présence</th><th>Tâches</th><th></th></tr></thead><tbody>${adm().employees.map(e=>`<tr><td>${esc(e.name)}</td><td>${esc(SITES[e.site])} · ${e.rate}% · ${e.days.map((v,i)=>v?DAYS[i].slice(0,3):'').filter(Boolean).join(', ')}</td><td>${e.skills.map(aTaskLabel).map(esc).join(', ')}</td><td><button data-aemp="${esc(e.id)}">Modifier</button> <button class="red" data-adelemp="${esc(e.id)}">Supprimer</button></td></tr>`).join('')}</tbody></table><p class="muted">Les nouvelles tâches sont autorisées pour les employés existants. Tu peux ensuite adapter leurs habilitations dans Modifier.</p><p class="muted">Dans Modifier, tu peux définir le site de chaque jour : 0 = La Chaux-de-Fonds, 1 = Bassecourt. Exemple 00001 : vendredi à Bassecourt.</p></div>`}
+function adminTasks(){return `<div class="card"><h2>Créer et organiser les tâches administratives</h2><form id="aaddtask" class="grid"><div class="field"><label>Nom de la tâche</label><input name="name" required></div><div class="field"><label>Priorité (1 = première)</label><input name="priority" type="number" min="1" max="99" value="1" required></div><div class="field"><label>Objectif initial par site (jours/semaine)</label><input name="days" type="number" min="0" max="20" step="0.5" value="1" required></div><div class="field"><label>&nbsp;</label><button class="primary">Créer la tâche</button></div></form></div><div class="card scroll"><table><thead><tr><th>Tâche</th><th>Priorité</th><th>Quota initial</th><th></th></tr></thead><tbody>${adm().tasks.map(t=>`<tr><td>${esc(t.name)}</td><td>${t.priority}</td><td>${format(t.days)} j</td><td><button data-atask="${esc(t.id)}">Modifier</button> <button class="red" data-adeltask="${esc(t.id)}">Supprimer</button></td></tr>`).join('')}</tbody></table></div>`}
+function adminAbsences(){return `<div class="card"><h2>Vacances et absences administratives</h2><form id="aaddabs" class="grid"><div class="field"><label>Employé</label><select name="employee">${adm().employees.map(e=>`<option value="${esc(e.id)}">${esc(e.name)}</option>`).join('')}</select></div><div class="field"><label>Type</label><select name="type"><option value="vacances">Vacances</option><option value="absence">Absence</option></select></div><div class="field"><label>Du</label><input type="date" name="from" required></div><div class="field"><label>Au</label><input type="date" name="to" required></div><div class="field"><label>Durée</label><select name="part"><option value="both">Journée entière</option><option value="am">Matin</option><option value="pm">Après-midi</option></select></div><div class="field"><label>&nbsp;</label><button class="primary">Enregistrer</button></div></form></div><div class="card scroll"><table><thead><tr><th>Employé</th><th>Type</th><th>Du</th><th>Au</th><th>Créneau</th><th></th></tr></thead><tbody>${adm().absences.map(a=>`<tr><td>${esc(adm().employees.find(e=>e.id===a.employee)?.name||'Supprimé')}</td><td>${esc(a.type)}</td><td>${fr(a.from)}</td><td>${fr(a.to)}</td><td>${a.part}</td><td><button class="red" data-adelabs="${esc(a.id)}">Supprimer</button></td></tr>`).join('')}</tbody></table></div>`}
+function adminRules(){return `<div class="card"><h2>Règles administratives par succursale</h2><p class="muted">Nombre de jours souhaités par tâche et par semaine, selon le nombre d'employés absents. La priorité se règle dans l'onglet Tâches. Les changements s'appliquent à la prochaine génération.</p><form id="arules">${SITES.map((site,i)=>`<h3>${esc(site)}</h3><div class="scroll"><table><thead><tr><th>Tâche</th><th>0 absent</th><th>1 absent</th><th>2 absents ou plus</th></tr></thead><tbody>${adm().tasks.map(t=>`<tr><td>${esc(t.name)}</td>${[0,1,2].map(n=>`<td><input type="number" min="0" max="20" step="0.5" name="ar_${i}_${esc(t.id)}_${n}" value="${adm().rules[i]?.[t.id]?.[n]??t.days}" style="width:85px"></td>`).join('')}</tr>`).join('')}</tbody></table></div>`).join('')}<button class="primary">Enregistrer les règles</button></form></div>`}
+function adminIssues(){let out=[];for(let w=1;w<=weeks(state.year);w++)for(let site=0;site<2;site++){let ds=weekDays(state.year,w),has=ds.some(d=>adm().employees.some(e=>aSite(e,d)===site&&adm().assignments[key(d,e.id)]));if(!has)continue;let q=aTarget(site,state.year,w),totals=aTotals(site,state.year,w);for(let t of adm().tasks){let goal=+(q.values[t.id]?.[Math.min(q.n,2)]??t.days);if((totals[t.id]||0)<goal)out.push(`Semaine ${w}, ${SITES[site]} : ${t.name}, ${format(totals[t.id]||0)} / ${format(goal)} j`)}for(let d of ds)for(let p of ['am','pm'])for(let t of adm().tasks){let z=adm().employees.filter(e=>aSite(e,d)===site&&aGet(d,e.id)[p]===t.id);if(z.length>1)out.push(`${fr(d)}, ${SITES[site]} : doublon sur ${t.name}`)}}for(let [k,x] of Object.entries(adm().assignments)){let [d,id]=k.split('|'),e=adm().employees.find(e=>e.id===id);if(!d.startsWith(state.year+'-'))continue;for(let p of ['am','pm'])if(x[p]&&(!e||!aAvailable(e,d,p,aSite(e,d),x[p])))out.push(`${fr(d)} : affectation incompatible pour ${e?.name||id}`)}return out}
+function adminVigilance(){let issues=adminIssues();return `<div class="card"><h2>Vigilance administrative</h2><p>${issues.length} alerte(s)</p>${issues.length?issues.slice(0,200).map(x=>`<div class="warn">${esc(x)}</div>`).join(''):'<div class="ok">Aucune anomalie détectée sur les semaines enregistrées.</div>'}</div>`}
+function renderAdmin(){let a=adm();if(!adminTabs.includes(a.tab))a.tab='Planning';$('tabs').innerHTML=adminTabs.map(t=>`<button data-atab="${esc(t)}" class="${a.tab===t?'on':''}">${esc(t)}</button>`).join('');$('tabs').querySelectorAll('[data-atab]').forEach(b=>b.onclick=()=>{a.tab=b.dataset.atab;render()});$('app').innerHTML=({'Planning':adminPlanning,'Employés':adminEmployees,'Tâches':adminTasks,'Vacances et absences':adminAbsences,'Règles':adminRules,'Vigilance':adminVigilance,'Journal':journalPage})[a.tab]();bindAdmin();bindJournal()}
+function bindAdmin(){let x,a=adm();if(x=$('ayear'))x.onchange=()=>{let v=+$('ayear').value;if(v>=2020&&v<=2100){state.year=v;state.week=Math.min(state.week,weeks(v));render()}};if(x=$('aweek'))x.onchange=()=>{state.week=+$('aweek').value;render()};if(x=$('asite'))x.onchange=()=>{a.siteView=$('asite').value==='all'?'all':+$('asite').value;render()};if(x=$('aprev'))x.onclick=()=>{if(state.week>1)state.week--;else{state.year--;state.week=weeks(state.year)}render()};if(x=$('anext'))x.onclick=()=>{if(state.week<weeks(state.year))state.week++;else{state.year++;state.week=1}render()};if(x=$('agenerate'))x.onclick=()=>{if(!confirm('Remplacer les affectations administratives de cette semaine ?'))return;for(let site of (a.siteView==='all'?[0,1]:[+a.siteView]))aGenerate(state.year,state.week,site);render()};if(x=$('apropagate'))x.onclick=aPropagate;
+if(x=$('aaddtask'))x.onsubmit=ev=>{ev.preventDefault();let f=new FormData(ev.currentTarget);let t={id:'t'+Date.now(),name:String(f.get('name')).trim(),priority:+f.get('priority'),days:+f.get('days')};if(!t.name)return;a.tasks.push(t);for(let site=0;site<2;site++)a.rules[site][t.id]=[t.days,t.days,t.days];for(const e of a.employees)if(!e.skills.includes(t.id))e.skills.push(t.id);render();alert('Tâche créée et autorisée pour les employés administratifs existants. Tu peux modifier leurs habilitations individuellement.')};
+document.querySelectorAll('[data-atask]').forEach(b=>b.onclick=()=>{let t=a.tasks.find(t=>t.id===b.dataset.atask);if(!t)return;let name=prompt('Nom de la tâche',t.name);if(name===null||!name.trim())return;let pr=prompt('Priorité (1 = première)',t.priority);if(pr===null||!(+pr>=1))return;t.name=name.trim();t.priority=+pr;render()});
+document.querySelectorAll('[data-adeltask]').forEach(b=>b.onclick=()=>{if(!confirm('Supprimer cette tâche et ses affectations ?'))return;let id=b.dataset.adeltask;a.tasks=a.tasks.filter(t=>t.id!==id);for(let e of a.employees)e.skills=e.skills.filter(x=>x!==id);for(let k of Object.keys(a.assignments)){let x=normalize(a.assignments[k]);aPut(...k.split('|'),x.am===id?'':x.am,x.pm===id?'':x.pm)}for(let r of a.rules)delete r[id];render()});
+if(x=$('aaddemp'))x.onsubmit=ev=>{ev.preventDefault();let f=new FormData(ev.currentTarget),name=String(f.get('name')||'').trim();if(!name)return;a.employees.push({id:'ae'+Date.now(),name,site:+f.get('site'),rate:+f.get('rate'),days:DAYS.map((_,i)=>f.has('d'+i)?1:0),skills:a.tasks.filter(t=>f.has('s_'+t.id)).map(t=>t.id)});render()};
+document.querySelectorAll('[data-aemp]').forEach(b=>b.onclick=()=>{let e=a.employees.find(e=>e.id===b.dataset.aemp);if(!e)return;let name=prompt('Nom',e.name);if(name===null||!name.trim())return;let rate=prompt('Taux (%)',e.rate);if(rate===null||!(+rate>=10&&+rate<=100))return;let days=prompt('Présence lundi à vendredi : 1 = travaille, 0 = congé',e.days.join(''));if(days===null||!/^[01]{5}$/.test(days))return;let sd=prompt('Succursale par jour (0 = Chaux-de-Fonds, 1 = Bassecourt). Exemple 00001',e.siteDays?.join('')||String(e.site).repeat(5));if(sd===null||!/^[01]{5}$/.test(sd))return;let tasks=prompt('Tâches autorisées (numéros séparés par virgules) :\n'+a.tasks.map((t,i)=>`${i+1} = ${t.name}`).join('\n'),e.skills.map(id=>a.tasks.findIndex(t=>t.id===id)+1).filter(n=>n>0).join(','));if(tasks===null)return;let skills=tasks.split(',').map(n=>a.tasks[+n.trim()-1]?.id).filter(Boolean);Object.assign(e,{name:name.trim(),rate:+rate,days:days.split('').map(Number),site:+sd[0],siteDays:sd.split('').map(Number),skills});for(let k of Object.keys(a.assignments))if(k.endsWith('|'+e.id))delete a.assignments[k];render()});
+document.querySelectorAll('[data-adelemp]').forEach(b=>b.onclick=()=>{if(!confirm('Supprimer cet employé ?'))return;let id=b.dataset.adelemp;a.employees=a.employees.filter(e=>e.id!==id);for(let k of Object.keys(a.assignments))if(k.endsWith('|'+id))delete a.assignments[k];render()});
+if(x=$('aaddabs'))x.onsubmit=ev=>{ev.preventDefault();let f=new FormData(ev.currentTarget),from=f.get('from'),to=f.get('to'),id=f.get('employee'),part=f.get('part');if(!id||from>to)return alert('Vérifie les dates et l’employé.');a.absences.push({id:'aa'+Date.now(),employee:id,from,to,part,type:f.get('type')});for(let k of Object.keys(a.assignments)){let [d,eid]=k.split('|');if(eid!==id||d<from||d>to)continue;let v=aGet(d,id);if(part==='both'||part==='am')v.am='';if(part==='both'||part==='pm')v.pm='';aPut(d,id,v.am,v.pm)}render()};
+document.querySelectorAll('[data-adelabs]').forEach(b=>b.onclick=()=>{a.absences=a.absences.filter(x=>x.id!==b.dataset.adelabs);render()});
+if(x=$('arules'))x.onsubmit=ev=>{ev.preventDefault();let f=new FormData(ev.currentTarget);let pending=JSON.parse(JSON.stringify(a.rules));for(let site=0;site<2;site++)for(let t of a.tasks){let v=[0,1,2].map(n=>+f.get(`ar_${site}_${t.id}_${n}`));if(v.some(n=>!Number.isFinite(n)||n<0||n>20||n*2%1))return alert('Entre des valeurs positives par pas de 0,5 jour.');pending[site][t.id]=v}a.rules=pending;render();alert('Règles administratives enregistrées.')};
+document.querySelectorAll('[data-aedit]').forEach(b=>b.onclick=()=>{let [d,id]=b.dataset.aedit.split('|'),p=b.dataset.part,e=a.employees.find(e=>e.id===id);if(!e)return;let site=aSite(e,d);if(!aAvailable(e,d,p,site))return alert('Employé absent ou indisponible.');let tasks=a.tasks.filter(t=>e.skills.includes(t.id)),x=aGet(d,id),options=['0 = Libre',...tasks.map((t,i)=>`${i+1} = ${t.name}`)];let v=prompt(`${e.name} — ${fr(d)} — ${p.toUpperCase()}\n${options.join('\n')}`,String(Math.max(0,tasks.findIndex(t=>t.id===x[p])+1)));if(v===null)return;let n=+v;if(!Number.isInteger(n)||n<0||n>tasks.length)return;let t=n?tasks[n-1].id:'';if(t&&a.employees.some(z=>z.id!==id&&aSite(z,d)===site&&aGet(d,z.id)[p]===t))return alert('Tâche déjà attribuée sur ce créneau.');x[p]=t;aPut(d,id,x.am,x.pm);render()})}
+
+// Extensions du secteur technique : missions libres et renforts ponctuels.
+function assignmentCaption(e,date,part,site,unavailable,mission){
+ if(absent(e,date,part))return 'Absent / indisponible';
+ if(!worksAt(e,site,date))return 'À '+SITES[employeeSite(e,date)];
+ if(unavailable)return 'Absent / indisponible';
+ return (LABEL[mission]||'Libre')+(state.siteOverrides?.[key(date,e.id)]!==undefined&&e.site!==site?' (renfort)':'');
+}
+function customMissionsPage(){
+ let html='';
+ for(const site of (state.siteView==='all'?[0,1]:[+state.siteView])){
+  html+='<div class="card"><h2>Quotas actuels — '+esc(SITES[site])+'</h2><table><thead><tr><th>Mission</th><th>0 absent</th><th>1 absent</th><th>2 absents ou plus</th></tr></thead><tbody>';
+  for(const m of ['curatif','livraison','desinfection'])html+='<tr><td>'+esc(LABEL[m])+'</td>'+[0,1,2].map(n=>'<td>'+format(state.rules[site][n][m])+' j</td>').join('')+'</tr>';
+  html+='<tr><td>SAV préventif</td><td colspan="3">Temps restant</td></tr></tbody></table><p class="muted">Les quotas se modifient dans Règles.</p></div>';
+ }
+ html+='<div class="card"><h2>Missions techniques supplémentaires</h2><p class="muted">Ajoute les missions dont tu as besoin (ex. montage, formation, inventaire). Elles seront sélectionnables dans le planning et resteront réservées lors de la génération automatique. Elles ne créent pas de quota automatique.</p>';
+ html+='<form id="addCustomMission" class="toolbar"><label>Nom de la mission <input name="name" maxlength="80" placeholder="Ex. Montage technique" required></label><button class="primary">Ajouter une mission</button></form>';
+ if(state.customMissions.length){
+  html+='<div class="scroll"><table><thead><tr><th>Mission</th><th>Mode</th><th>Actions</th></tr></thead><tbody>';
+  for(const m of state.customMissions)html+='<tr><td>'+esc(m.name)+'</td><td>Attribution manuelle</td><td><button data-rename-mission="'+esc(m.id)+'">Renommer</button> <button class="red" data-delete-mission="'+esc(m.id)+'">Supprimer</button></td></tr>';
+  html+='</tbody></table></div>';
+ }
+ html+='</div><div class="card"><h2>Employé prioritaire pour les livraisons</h2><form id="preferred" class="grid">';
+ for(let site=0;site<2;site++){
+  html+='<div><h3>'+esc(SITES[site])+'</h3><div class="field"><label>Employé prioritaire</label><select name="p'+site+'"><option value="">Aucun</option>';
+  for(const e of state.employees.filter(e=>e.skills.includes('livraison')&&DAYS.some((_,i)=>e.days[i]&&(Array.isArray(e.siteDays)?+e.siteDays[i]===site:e.site===site))))
+   html+='<option value="'+esc(e.id)+'" '+(state.preferred[site]?.id===e.id?'selected':'')+'>'+esc(e.name)+'</option>';
+  html+='</select></div><div class="field"><label>Jours souhaités</label><input type="number" name="n'+site+'" min="0" max="5" step="0.5" value="'+(state.preferred[site]?.days??3)+'"></div></div>';
+ }
+ return html+'<div><button class="primary">Enregistrer les préférences</button></div></form></div>';
+}
+function transferHtml(){
+ let html='<div class="card"><h2>Renforts entre les deux succursales</h2><p class="muted">Déplace ponctuellement un technicien pour une date ou une période. Il apparaîtra dans le site de destination et son site habituel indiquera où il se trouve. Les anciennes missions des journées déplacées seront libérées pour éviter les conflits.</p>';
+ html+='<form id="addTransfer" class="grid"><div class="field"><label>Technicien</label><select name="employee" required>';
+ for(const e of state.employees.filter(e=>!e.only))html+='<option value="'+esc(e.id)+'">'+esc(e.name)+' — '+esc(SITES[e.site])+'</option>';
+ html+='</select></div><div class="field"><label>Du</label><input type="date" name="from" required></div><div class="field"><label>Au</label><input type="date" name="to" required></div><div class="field"><label>Site de destination</label><select name="site">';
+ for(let site=0;site<2;site++)html+='<option value="'+site+'">'+esc(SITES[site])+'</option>';
+ html+='</select></div><div class="field"><label>&nbsp;</label><button class="primary">Enregistrer le déplacement</button></div></form></div>';
+ let moves=Object.entries(state.siteOverrides).map(([k,site])=>{let [date,id]=k.split('|');return {k,date,site,e:state.employees.find(e=>e.id===id)}}).filter(m=>m.e).sort((a,b)=>a.date.localeCompare(b.date));
+ html+='<div class="card scroll"><h3>Déplacements enregistrés ('+moves.length+')</h3><table><thead><tr><th>Date</th><th>Technicien</th><th>Site de destination</th><th></th></tr></thead><tbody>';
+ for(const m of moves.slice(0,300))html+='<tr><td>'+fr(m.date)+'</td><td>'+esc(m.e.name)+'</td><td>'+esc(SITES[m.site])+'</td><td><button class="red" data-delete-transfer="'+esc(m.k)+'">Retirer</button></td></tr>';
+ html+='</tbody></table>'+(moves.length>300?'<p class="muted">Seuls les 300 premiers déplacements sont affichés.</p>':'')+'</div>';
+ return html;
+}
+function installExtraControls(){
+ if(state.tab==='Missions'){
+  const form=$('addCustomMission');
+  if(form)form.onsubmit=ev=>{
+   ev.preventDefault();
+   const name=String(new FormData(form).get('name')||'').trim();
+   if(!name)return;
+   if(MISSIONS.some(id=>LABEL[id].toLocaleLowerCase('fr')===name.toLocaleLowerCase('fr')))return alert('Cette mission existe déjà.');
+   const id='mission_'+Date.now().toString(36)+Math.random().toString(36).slice(2,7);
+   state.customMissions.push({id,name});
+   for(const e of state.employees)if(!e.skills.includes(id))e.skills.push(id);
+   render();
+  };
+  document.querySelectorAll('[data-rename-mission]').forEach(b=>b.onclick=()=>{
+   const m=state.customMissions.find(m=>m.id===b.dataset.renameMission);
+   if(!m)return;
+   const name=prompt('Nom de la mission',m.name);
+   if(name===null||!name.trim())return;
+   if(MISSIONS.some(id=>id!==m.id&&LABEL[id].toLocaleLowerCase('fr')===name.trim().toLocaleLowerCase('fr')))return alert('Cette mission existe déjà.');
+   m.name=name.trim().slice(0,80);render();
+  });
+  document.querySelectorAll('[data-delete-mission]').forEach(b=>b.onclick=()=>{
+   const id=b.dataset.deleteMission;
+   if(!confirm('Supprimer cette mission et toutes ses affectations dans le planning ?'))return;
+   state.customMissions=state.customMissions.filter(m=>m.id!==id);
+   for(const e of state.employees)e.skills=e.skills.filter(s=>s!==id);
+   for(const k of Object.keys(state.assignments)){const [d,e]=k.split('|'),a=get(d,e);put(d,e,a.am===id?'':a.am,a.pm===id?'':a.pm)}
+   render();
+  });
+ }
+ if(state.tab==='Employés'){
+  $('app').insertAdjacentHTML('beforeend',transferHtml());
+  const form=$('addTransfer');
+  form.onsubmit=ev=>{
+   ev.preventDefault();
+   const f=new FormData(form),e=state.employees.find(e=>e.id===f.get('employee')),from=String(f.get('from')),to=String(f.get('to')),site=Number(f.get('site'));
+   if(!e||!/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(from)||from>to||![0,1].includes(site))return alert('Vérifie les données du déplacement.');
+   if((parseDay(to)-parseDay(from))/86400000>366)return alert('Sélectionne une période de 366 jours maximum.');
+   const dates=[];
+   for(let d=parseDay(from),end=parseDay(to);d<=end;d.setDate(d.getDate()+1)){
+    const date=iso(d),i=dayIndex(date);
+    if(i<5&&e.days[i])dates.push(date);
+   }
+   if(!dates.length)return alert('Aucun jour de présence dans la période.');
+   const changed=dates.filter(date=>employeeSite(e,date)!==site);
+   const occupied=changed.filter(date=>{const a=get(date,e.id);return a.am||a.pm});
+   if(occupied.length&&!confirm(occupied.length+' journée(s) ont déjà des missions. Les libérer pour déplacer le technicien ?'))return;
+   for(const date of dates){
+    const k=key(date,e.id);
+    if(regularSite(e,date)===site)delete state.siteOverrides[k];
+    else state.siteOverrides[k]=site;
+    if(changed.includes(date))delete state.assignments[k];
+   }
+   render();
+  };
+  document.querySelectorAll('[data-delete-transfer]').forEach(b=>b.onclick=()=>{
+   const k=b.dataset.deleteTransfer,[date,id]=k.split('|'),a=get(date,id);
+   if((a.am||a.pm)&&!confirm('Retirer le déplacement ? Les missions de cette journée seront aussi libérées.'))return;
+   delete state.siteOverrides[k];delete state.assignments[k];render();
+  });
+ }
+}
+render();
+</script><style>
+/* Module de démonstration - la base de l'application reste intacte. */
+.time-hero{padding:19px 22px;border-radius:15px;background:linear-gradient(110deg,#133d63,#1d7b88);color:white;display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap;align-items:center}
+.time-hero h2{margin:4px 0 6px;color:white;font-size:23px}.time-hero p{margin:0;opacity:.9;font-size:13px;max-width:700px}
+.time-demo-tag{background:#ffedb5;color:#6e4800;font-weight:750;font-size:12px;padding:8px 11px;border-radius:20px}
+.time-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin:12px 0}
+.time-kpi{background:white;border:1px solid #dce7ed;border-radius:12px;padding:16px;min-width:0;box-shadow:0 1px 6px #23456908}
+.time-kpi .time-kpi-label{font-size:12px;color:#64778a;font-weight:700;text-transform:uppercase;letter-spacing:.4px}
+.time-kpi .time-kpi-value{display:block;font-size:25px;font-weight:800;color:#153b60;margin:7px 0 3px;font-variant-numeric:tabular-nums}
+.time-kpi .time-kpi-detail{font-size:12px;color:#687d8c}
+.time-grid-cards{display:grid;grid-template-columns:minmax(275px,1fr) minmax(330px,1.15fr);gap:13px}
+.time-toolbar{display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px;margin-top:14px}
+.time-toolbar label,.time-form label{display:flex;flex-direction:column;font-size:12px;font-weight:750;color:#284761;gap:5px}
+.time-toolbar label input,.time-toolbar label select,.time-form input,.time-form select,.time-form textarea{width:100%;min-width:0}
+.time-toolbar label{min-width:150px;flex:1}
+.time-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:11px;margin-top:13px}
+.time-form .wide{grid-column:1/-1}.time-form textarea{min-height:65px;resize:vertical;padding:10px;border:1px solid #cbd6e0;border-radius:8px;font:inherit}
+.time-hint{background:#eff6fa;border-left:3px solid #2e83aa;padding:11px 13px;border-radius:6px;font-size:12px;line-height:1.5;color:#2a526c;margin-top:11px}
+.time-status{border-radius:20px;padding:4px 9px;font-size:11px;font-weight:800;display:inline-flex;white-space:nowrap}
+.time-ok{background:#e2f6ea;color:#24734b}.time-wait{background:#fff2d7;color:#946215}.time-no{background:#fee6e6;color:#ac3737}.time-muted{background:#e9eef4;color:#536a81}
+.time-small{font-size:12px;color:#697a8a}.time-pill{font-size:11px;background:#e8f0f9;color:#24547e;border-radius:6px;padding:3px 6px;display:inline-block}
+.time-actions{display:flex;align-items:center;gap:5px;flex-wrap:wrap}.time-actions button{font-size:12px;padding:7px 9px}
+.time-empty{padding:23px;text-align:center;color:#68778a;font-size:13px}
+.time-alert{background:#fff5e2;color:#745122;border-left:3px solid #dcad4a;padding:12px;margin:12px 0;border-radius:6px;font-size:12px}
+.time-month-lock{border:1px solid #bdd7e7;border-radius:10px;padding:12px;background:#f5fbff;display:flex;align-items:center;justify-content:space-between;gap:11px;flex-wrap:wrap;margin-top:12px}
+.time-month-lock strong{font-size:13px}.time-month-lock button{font-size:12px}
+.time-table th{font-size:12px;white-space:nowrap}.time-table td{font-variant-numeric:tabular-nums}
+.time-right{text-align:right}.time-plus{color:#117348;font-weight:800}.time-minus{color:#bd5d24;font-weight:800}
+.time-note{font-size:11px;color:#6a7885;line-height:1.5;margin-top:9px}
+@media(max-width:780px){.time-grid-cards{grid-template-columns:1fr}.time-form{grid-template-columns:1fr}.time-hero{padding:16px}.time-kpi .time-kpi-value{font-size:22px}}
+
+</style><script>
+/*
+ * VERSION DEMONSTRATION. Données fictives et sauvegarde dans le navigateur.
+ * Les rôles simulés ne sont PAS une authentification. Ne pas utiliser en production.
+ */
+'use strict';
+
+const H_KEY = 'planningfs_gestion_heures_demo_v1';
+const H_TYPES = {
+  travail: 'Travail', vacances: 'Vacances', maladie: 'Maladie', accident: 'Accident',
+  conge_paye: 'Congé payé', conge_sans_solde: 'Congé sans solde',
+  recuperation: 'Récupération heures flexibles', autre: 'Autre absence'
+};
+const H_ABSENCE_TYPES = new Set(Object.keys(H_TYPES).filter(x => x !== 'travail'));
+
+function hMonthNow(){
+  const d = new Date();
+  return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0');
+}
+function hFirstWorkdays(month, count){
+  const dates=[];
+  for(let d=1;d<=10&&dates.length<count;d++){
+    const date=month+'-'+String(d).padStart(2,'0');
+    const day=new Date(date+'T12:00:00').getDay();
+    if(day>=1&&day<=5)dates.push(date);
+  }
+  return dates;
+}
+function hInitial(){
+  const month=hMonthNow(), dates=hFirstWorkdays(month,4), entries={};
+  for(const [id,offset] of [['fabien',0],['nathalie',1]]){
+    dates.slice(0,3).forEach((date,i)=>{
+      entries[date+'|'+id]={date,emp:id,type:'travail',start:offset?'08:15':'08:00',
+        end:i===2?'17:30':'17:00',breakMin:60,expectedMin:480,note:'Exemple fictif',
+        approvedAt:new Date().toISOString(),approvedBy:'Démonstration'};
+    });
+  }
+  const requests=[{id:'hdemo-pending',date:dates[3],emp:'nathalie',type:'travail',
+    start:'08:00',end:'17:45',breakMin:60,note:'Exemple : départ décalé',
+    author:'Nathalie',at:new Date().toISOString()}];
+  return {month,viewEmp:'fabien',role:'admin',hours100:40,entries,requests,history:[],locks:[]};
+}
+
+let hData;
+try{
+  const saved=JSON.parse(localStorage.getItem(H_KEY)||'null');
+  hData=saved&&typeof saved==='object'?{...hInitial(),...saved}:hInitial();
+  if(!hData.entries||typeof hData.entries!=='object')hData.entries={};
+  if(!Array.isArray(hData.requests))hData.requests=[];
+  if(!Array.isArray(hData.history))hData.history=[];
+  if(!Array.isArray(hData.locks))hData.locks=[];
+}catch{hData=hInitial()}
+
+function hSave(){
+  try{localStorage.setItem(H_KEY,JSON.stringify(hData))}
+  catch(e){alert('Impossible de conserver la démonstration : '+e.message)}
+}
+function hPeople(){return state.employees||[]}
+function hPerson(id){return hPeople().find(e=>e.id===id)}
+function hName(id){return hPerson(id)?.name||id}
+function hSite(id){return SITES[hPerson(id)?.site??0]||'—'}
+function hCurrentEmp(){return hData.role==='collab'?'nathalie':hData.viewEmp}
+function hMonthKey(date){return date.slice(0,7)}
+function hFormatDate(date){
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(date))return date;
+  return date.slice(8,10)+'.'+date.slice(5,7)+'.'+date.slice(0,4);
+}
+function hMinutes(time){
+  if(!/^([01]\d|2[0-3]):[0-5]\d$/.test(String(time||'')))return NaN;
+  const [h,m]=time.split(':').map(Number);return h*60+m;
+}
+function hWorked(row){
+  if(row.type!=='travail')return 0;
+  const from=hMinutes(row.start),to=hMinutes(row.end),pause=Number(row.breakMin);
+  if(!Number.isFinite(from)||!Number.isFinite(to)||!Number.isFinite(pause))return NaN;
+  return to-from-pause;
+}
+function hExpected(emp,date){
+  const person=hPerson(emp);if(!person)return 0;
+  const day=(new Date(date+'T12:00:00').getDay()+6)%7;
+  if(day>=5||!person.days?.[day])return 0;
+  const active=(person.days||[]).filter(Boolean).length||5;
+  return Math.round(Number(hData.hours100||40)*60*(Number(person.rate||100)/100)/active);
+}
+function hExpectedRow(row){
+  return Number.isFinite(row.expectedMin)?row.expectedMin:hExpected(row.emp,row.date);
+}
+function hDuration(mins){
+  if(!Number.isFinite(mins))return '—';
+  const negative=mins<0,abs=Math.round(Math.abs(mins));
+  return (negative?'−':'')+Math.floor(abs/60)+' h '+String(abs%60).padStart(2,'0');
+}
+function hFlex(mins){return (mins>0?'+':mins<0?'−':'')+hDuration(Math.abs(mins))}
+function hActiveRows(month=hData.month, emp=null){
+  return Object.values(hData.entries).filter(r=>hMonthKey(r.date)===month&&(!emp||r.emp===emp))
+    .sort((a,b)=>a.date.localeCompare(b.date)||a.emp.localeCompare(b.emp));
+}
+function hPending(month=hData.month){return hData.requests.filter(r=>hMonthKey(r.date)===month)}
+function hMonthLocked(month=hData.month){return hData.locks.includes(month)}
+function hTotals(rows){
+  let worked=0,flex=0,leave=0,days=0;
+  for(const r of rows){
+    if(r.type==='travail'){
+      const val=hWorked(r);if(Number.isFinite(val)){worked+=val;flex+=val-hExpectedRow(r);days++}
+    }else leave++;
+  }
+  return {worked,flex,leave,days};
+}
+function hBalanceBefore(emp,month){
+  return Object.values(hData.entries).filter(r=>r.emp===emp&&hMonthKey(r.date)<month&&r.type==='travail')
+    .reduce((sum,r)=>sum+hWorked(r)-hExpectedRow(r),0);
+}
+function hOptions(){
+  return Object.entries(H_TYPES).map(([key,name])=>`<option value="${key}">${esc(name)}</option>`).join('');
+}
+function hPersonOptions(selected){
+  return hPeople().map(e=>`<option value="${esc(e.id)}" ${e.id===selected?'selected':''}>${esc(e.name)} · ${esc(SITES[e.site])}</option>`).join('');
+}
+function hSummaryTable(){
+  const rows=hPeople().map(e=>{
+    const res=hTotals(hActiveRows(hData.month,e.id));
+    const pending=hPending().filter(r=>r.emp===e.id).length;
+    const before=hBalanceBefore(e.id,hData.month),after=before+res.flex;
+    return `<tr><td><b>${esc(e.name)}</b><br><span class="time-small">${esc(SITES[e.site])}</span></td>`
+      +`<td>${hDuration(res.worked)}</td><td>${hFlex(before)}</td><td class="${res.flex>=0?'time-plus':'time-minus'}">${hFlex(res.flex)}</td><td class="${after>=0?'time-plus':'time-minus'}">${hFlex(after)}</td>`
+      +`<td>${res.leave}</td><td>${pending?`<span class="time-status time-wait">${pending} en attente</span>`:'—'}</td></tr>`;
+  });
+  return `<div class="card"><div class="toolbar"><h3 style="margin:0">Récapitulatif mensuel · comptabilité</h3><span class="time-status time-ok">Lignes approuvées uniquement</span></div>`
+    +`<div class="scroll"><table class="time-table"><thead><tr><th>Employé</th><th>Heures travaillées</th><th>Report initial*</th><th>Variation flexible*</th><th>Solde final*</th><th>Jours d'absence</th><th>Demandes</th></tr></thead><tbody>${rows.join('')}</tbody></table></div>`
+    +`<p class="time-note">* Le solde affiché représente les écarts des seules journées travaillées et approuvées dans le mois, pas un solde RH définitif. Les jours sans saisie et les absences sont neutralisés dans cette démo ; les règles de rémunération et de crédit des congés restent à confirmer avec la Fondation.</p></div>`;
+}
+function hHistoryTable(){
+  const rows=hData.history.filter(r=>hMonthKey(r.date)===hData.month).slice(-10).reverse();
+  return `<div class="card"><h3>Historique des décisions</h3><div class="scroll"><table><thead><tr><th>Date</th><th>Employé</th><th>Décision</th><th>Validé par</th></tr></thead><tbody>`
+    +rows.map(r=>`<tr><td>${hFormatDate(r.date)}</td><td>${esc(hName(r.emp))}</td><td><span class="time-status ${r.decision==='approuvée'?'time-ok':'time-no'}">${esc(r.decision)}</span></td><td>${esc(r.by)}</td></tr>`).join('')
+    +(rows.length?'':'<tr><td colspan="4" class="time-empty">Aucune décision ce mois.</td></tr>')+'</tbody></table></div></div>';
+}
+function hPendingTable(){
+  const rows=hPending().filter(r=>hData.role==='admin'||r.emp==='nathalie');
+  return `<div class="card"><h3>Demandes en attente (${rows.length})</h3><p class="time-small">Une correction n’affecte les heures retenues qu’après approbation.</p><div class="scroll"><table class="time-table"><thead><tr><th>Jour</th><th>Demande</th><th>Heures / catégorie</th><th>Motif</th><th>Décision</th></tr></thead><tbody>`
+    +rows.map(r=>{
+      const amount=r.type==='travail'?hDuration(hWorked(r)):esc(H_TYPES[r.type]||r.type);
+      const actions=hData.role==='admin'&&!hMonthLocked()?`<div class="time-actions"><button data-h-approve="${esc(r.id)}" class="primary">Approuver</button><button data-h-reject="${esc(r.id)}" class="red">Refuser</button></div>`:'<span class="time-status time-wait">En attente</span>';
+      return `<tr><td>${hFormatDate(r.date)}<br><span class="time-small">${esc(hName(r.emp))}</span></td><td>${esc(r.author)}<br><span class="time-status time-wait">À valider</span></td><td>${amount}</td><td>${esc(r.note||'—')}</td><td>${actions}</td></tr>`;
+    }).join('')+(rows.length?'':'<tr><td colspan="5" class="time-empty">Aucune demande en attente.</td></tr>')+'</tbody></table></div></div>';
+}
+function hApprovedTable(){
+  const id=hCurrentEmp(),rows=hActiveRows(hData.month,id);
+  return `<div class="card"><h3>Heures approuvées · ${esc(hName(id))}</h3><div class="scroll"><table class="time-table"><thead><tr><th>Date</th><th>Type</th><th>Horaire</th><th>Temps travaillé</th><th>Écart flexible</th><th>Statut</th></tr></thead><tbody>`
+   +rows.map(r=>{
+     const mins=hWorked(r),e=hExpectedRow(r),flex=Number.isFinite(mins)?mins-e:0;
+     const times=r.type==='travail'?`${esc(r.start)} - ${esc(r.end)}<br><span class="time-small">Pause : ${r.breakMin} min</span>`:'—';
+     return `<tr><td>${hFormatDate(r.date)}</td><td>${esc(H_TYPES[r.type]||r.type)}</td><td>${times}</td><td>${r.type==='travail'?hDuration(mins):'—'}</td>`
+       +`<td class="${flex>=0?'time-plus':'time-minus'}">${r.type==='travail'?hFlex(flex):'Neutralisé*'}</td><td><span class="time-status time-ok">Approuvé</span></td></tr>`;
+   }).join('')+(rows.length?'':'<tr><td colspan="6" class="time-empty">Aucune journée approuvée.</td></tr>')+'</tbody></table></div></div>';
+}
+
+function hPage(){
+  if(!hPerson(hData.viewEmp))hData.viewEmp=hPeople()[0]?.id||'fabien';
+  const emp=hCurrentEmp(), totals=hTotals(hActiveRows(hData.month,emp)),pending=hPending().filter(r=>hData.role==='admin'||r.emp==='nathalie').length;
+  const date=hData.month===hMonthNow()&&new Date().toISOString().slice(0,7)===hData.month?new Date().toISOString().slice(0,10):hData.month+'-01';
+  const lock=hMonthLocked();
+  return `<div class="time-hero"><div><span class="time-demo-tag">VERSION TEST · GITHUB</span><h2>Gestion des heures &amp; flexibles</h2><p>Fabien et Nathalie · Approbation des corrections · Export mensuel. Démonstration avec heures fictives, sans accès aux données du site Infomaniak.</p></div><span class="time-demo-tag">AUCUNE CONNEXION RÉELLE</span></div>`
+    +`<div class="card"><div class="time-toolbar"><label>Tester le rôle<select id="h-role"><option value="admin" ${hData.role==='admin'?'selected':''}>Fabien · administrateur</option><option value="collab" ${hData.role==='collab'?'selected':''}>Nathalie · collaboratrice</option></select></label>`
+    +`<label>Mois<input id="h-month" type="month" value="${esc(hData.month)}" min="2024-01" max="2099-12"></label>`
+    +`<label>Employé<select id="h-employee" ${hData.role==='collab'?'disabled':''}>${hPersonOptions(emp)}</select></label>`
+    +`<label>Horaire 100 % / semaine (démo)<input id="h-weekly" type="number" step="0.5" min="1" max="60" value="${Number(hData.hours100)}" ${hData.role==='collab'?'disabled':''}></label>`
+    +`<button id="h-export" class="primary" ${hData.role==='collab'?'disabled title="Accès administrateur uniquement"':''}>Exporter CSV comptabilité</button></div>`
+    +`<div class="time-hint">Le changement de rôle est <b>une simulation locale</b>, pas un vrai système de connexion. Les heures de référence (40 h par défaut) et les règles d’absence doivent être validées par la Fondation avant tout usage réel.</div></div>`
+    +`<div class="time-grid"><div class="time-kpi"><div class="time-kpi-label">Heures travaillées approuvées</div><strong class="time-kpi-value">${hDuration(totals.worked)}</strong><div class="time-kpi-detail">${totals.days} journées de travail enregistrées</div></div>`
+    +`<div class="time-kpi"><div class="time-kpi-label">Variation flexible constatée*</div><strong class="time-kpi-value ${totals.flex>=0?'time-plus':'time-minus'}">${hFlex(totals.flex)}</strong><div class="time-kpi-detail">Sur les journées saisies uniquement</div></div>`
+    +`<div class="time-kpi"><div class="time-kpi-label">Absences approuvées</div><strong class="time-kpi-value">${totals.leave} jour(s)</strong><div class="time-kpi-detail">Vacances, maladie, congés, etc.</div></div>`
+    +`<div class="time-kpi"><div class="time-kpi-label">Demandes en attente</div><strong class="time-kpi-value">${pending}</strong><div class="time-kpi-detail">Ne modifient pas les totaux</div></div></div>`
+    +`<div class="time-grid-cards"><div class="card"><h3>Déclarer une journée / demander une correction</h3>`
+    +`<p class="time-small">Toute saisie ou correction passe par la validation de Fabien dans cette démo.</p>`
+    +`<form id="h-form" class="time-form"><label>Jour<input name="date" type="date" value="${date}" required></label>`
+    +`<label>Type<select name="type">${hOptions()}</select></label>`
+    +`<label>Arrivée<input name="start" type="time" value="08:00" required></label>`
+    +`<label>Départ<input name="end" type="time" value="17:00" required></label>`
+    +`<label>Pause (minutes)<input name="breakMin" type="number" min="0" max="600" step="5" value="60" required></label>`
+    +`<label>Heures théoriques ce jour<input name="expected" type="text" value="—" disabled></label>`
+    +`<label class="wide">Motif / information<textarea name="note" maxlength="250" placeholder="Ex. départ anticipé, changement de pause, vacances..." required></textarea></label>`
+    +`<div class="wide"><button class="primary" type="submit" ${lock?'disabled':''}>Soumettre pour approbation</button><p class="time-note" id="h-live">Les heures ne deviennent définitives qu’après approbation.</p></div></form>`
+    +`</div><div><div class="card"><h3>Approbations</h3><p class="time-small">${hData.role==='admin'?'Tu peux approuver ou refuser les demandes de Fabien et Nathalie.':'Tu peux voir tes demandes. Fabien devra les examiner.'}</p>`
+    +`${hPendingTable().replace(/^<div class="card">|<\/div>$/g,'')}`
+    +`<div class="time-month-lock"><div><strong>${lock?'Mois clôturé':'Mois ouvert'} · ${esc(hData.month)}</strong><br><span class="time-small">${lock?'Les nouvelles corrections sont bloquées.':'Les demandes peuvent encore être envoyées.'}</span></div>`
+    +(hData.role==='admin'?`<button id="h-lock">${lock?'Rouvrir ce mois':'Clôturer ce mois'}</button>`:'')
+    +`</div></div></div></div>`
+    +hApprovedTable()+hSummaryTable()+hHistoryTable()
+    +`<p class="time-note">* Prototype uniquement : les absences sont neutralisées dans le calcul flexible, les heures supplémentaires et les éventuels suppléments de paie ne sont pas calculés. L’export mensuel doit être contrôlé par la comptabilité avant exploitation réelle.</p>`;
+}
+
+function hSyncAbsence(row){
+  const marker='h-demo-'+row.date+'-'+row.emp;
+  state.absences=(state.absences||[]).filter(a=>a.id!==marker);
+  if(H_ABSENCE_TYPES.has(row.type)){
+    state.absences.push({id:marker,employee:row.emp,type:row.type==='vacances'?'vacances':'absence',from:row.date,to:row.date,part:'both'});
+    delete state.assignments[row.date+'|'+row.emp];
+  }
+  save();
+}
+function hSubmit(ev){
+  ev.preventDefault();
+  if(hMonthLocked())return alert('Ce mois est clôturé. Demande sa réouverture.');
+  const form=ev.currentTarget,f=new FormData(form),emp=hCurrentEmp();
+  const date=String(f.get('date')),type=String(f.get('type')),
+    start=String(f.get('start')),end=String(f.get('end')),breakMin=Number(f.get('breakMin')),
+    note=String(f.get('note')||'').trim();
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(date)||!Number.isFinite(new Date(date+'T12:00:00').getTime())||hMonthKey(date)!==hData.month)return alert('Choisis un jour du mois affiché.');
+  if(!Object.hasOwn(H_TYPES,type))return alert('Catégorie non reconnue.');
+  if(!note)return alert('Précise le motif de ta demande.');
+  if(hData.requests.some(r=>r.date===date&&r.emp===emp))return alert('Une demande est déjà en attente pour cette journée. Attends son examen.');
+  if(type==='travail'){
+    const worked=hWorked({type,start,end,breakMin});
+    if(!Number.isFinite(worked)||worked<=0||worked>16*60||breakMin<0||!Number.isInteger(breakMin))return alert('Vérifie les horaires et la pause. Les horaires de nuit sont à définir séparément.');
+  }
+  hData.requests.push({id:'req-'+Date.now()+'-'+Math.random().toString(36).slice(2,6),emp,date,type,
+    start:type==='travail'?start:'',end:type==='travail'?end:'',breakMin:type==='travail'?breakMin:0,
+    note,author:hData.role==='admin'?'Fabien':'Nathalie',at:new Date().toISOString()});
+  hSave();render();alert('Demande enregistrée en attente d’approbation.');
+}
+function hDecide(id,approval){
+  if(hData.role!=='admin')return;
+  const idx=hData.requests.findIndex(r=>r.id===id);if(idx<0)return alert('Demande introuvable.');
+  const req=hData.requests[idx];
+  if(hData.locks.includes(hMonthKey(req.date)))return alert('Ce mois est clôturé.');
+  if(!confirm((approval?'Approuver':'Refuser')+' la demande de '+hName(req.emp)+' du '+hFormatDate(req.date)+' ?'))return;
+  hData.requests.splice(idx,1);
+  if(approval){
+    const row={emp:req.emp,date:req.date,type:req.type,start:req.start,end:req.end,breakMin:req.breakMin,
+      expectedMin:req.type==='travail'?hExpected(req.emp,req.date):0,
+      note:req.note,approvedBy:'Fabien',approvedAt:new Date().toISOString()};
+    hData.entries[row.date+'|'+row.emp]=row;
+    hSyncAbsence(row);
+  }
+  hData.history.push({date:req.date,emp:req.emp,by:'Fabien',decision:approval?'approuvée':'refusée',at:new Date().toISOString()});
+  hSave();render();
+}
+function hCSVCell(value){
+  let s=String(value??'');
+  if(/^[\s]*[=+@]/.test(s)||/^[\s]*-(?!\d+(?:[.,]\d+)?$)/.test(s))s="'"+s;
+  return '"'+s.replace(/"/g,'""')+'"';
+}
+function hExport(){
+  if(hData.role!=='admin')return alert('Réservé à l’administrateur.');
+  const headers=['Date','Employé','Site','Catégorie','Arrivée','Départ','Pause (min)','Temps travaillé (h)','Temps théorique (h)','Écart flexible (h)','Statut','Motif'];
+  const rows=hActiveRows().map(r=>{
+    const worked=hWorked(r),expected=hExpectedRow(r);
+    return [r.date,hName(r.emp),hSite(r.emp),H_TYPES[r.type]||r.type,r.start||'',r.end||'',r.breakMin||0,
+      r.type==='travail'?(worked/60).toFixed(2):'',r.type==='travail'?(expected/60).toFixed(2):'',
+      r.type==='travail'?((worked-expected)/60).toFixed(2):'','Approuvé',r.note||''];
+  });
+  rows.push([]);
+  rows.push(['RÉCAPITULATIF MENSUEL']);
+  for(const e of hPeople()){
+    const t=hTotals(hActiveRows(hData.month,e.id));
+    const before=hBalanceBefore(e.id,hData.month);
+    rows.push([e.name,'Total travaillé (h)',(t.worked/60).toFixed(2),
+      'Report initial (h)',(before/60).toFixed(2),'Variation flexible (h)',(t.flex/60).toFixed(2),
+      'Solde final (h)',((before+t.flex)/60).toFixed(2),'Absences (jours)',t.leave]);
+  }
+  const csv='\uFEFF'+[headers,...rows].map(row=>row.map(hCSVCell).join(';')).join('\r\n');
+  const blob=new Blob([csv],{type:'text/csv;charset=utf-8'}),url=URL.createObjectURL(blob);
+  const a=document.createElement('a');a.href=url;a.download='heures-test-comptabilite-'+hData.month+'.csv';a.click();
+  setTimeout(()=>URL.revokeObjectURL(url),2000);
+}
+function hUpdateCalc(){
+  const form=$('h-form');if(!form)return;
+  const type=form.elements.namedItem('type').value,date=form.elements.namedItem('date').value;
+  for(const name of ['start','end','breakMin'])form.elements.namedItem(name).disabled=type!=='travail';
+  const expected=hExpected(hCurrentEmp(),date),e=form.elements.namedItem('expected');
+  e.value=expected?hDuration(expected):'0 h 00 / hors horaire';
+  const mins=hWorked({type,start:form.elements.namedItem('start').value,end:form.elements.namedItem('end').value,breakMin:Number(form.elements.namedItem('breakMin').value)});
+  $('h-live').textContent=type==='travail'&&Number.isFinite(mins)?'Temps proposé : '+hDuration(mins)+' · écart : '+hFlex(mins-expected)+' · en attente d’approbation.':'Absence : saisie sans horaires, traitement du solde flexible à valider par la Fondation.';
+}
+function hBind(){
+  $('h-role').onchange=e=>{hData.role=e.target.value==='collab'?'collab':'admin';hSave();render()};
+  $('h-month').onchange=e=>{if(/^\d{4}-\d{2}$/.test(e.target.value)){hData.month=e.target.value;hSave();render()}};
+  $('h-employee').onchange=e=>{hData.viewEmp=e.target.value;hSave();render()};
+  $('h-weekly').onchange=e=>{
+    const n=Number(e.target.value);
+    if(hData.role!=='admin'||!Number.isFinite(n)||n<1||n>60)return alert('Choisis une durée entre 1 et 60 h par semaine.');
+    hData.hours100=n;hSave();render();
+  };
+  $('h-export').onclick=hExport;
+  const form=$('h-form');form.onsubmit=hSubmit;
+  for(const name of ['type','date','start','end','breakMin'])form.elements.namedItem(name).onchange=hUpdateCalc;
+  hUpdateCalc();
+  document.querySelectorAll('[data-h-approve]').forEach(b=>b.onclick=()=>hDecide(b.dataset.hApprove,true));
+  document.querySelectorAll('[data-h-reject]').forEach(b=>b.onclick=()=>hDecide(b.dataset.hReject,false));
+  if($('h-lock'))$('h-lock').onclick=()=>{
+    if(hData.role!=='admin')return;
+    const locked=hMonthLocked();
+    if(!locked&&hPending().length)return alert('Il reste des demandes en attente : approuve-les ou refuse-les avant de clôturer.');
+    if(!confirm(locked?'Rouvrir ce mois pour permettre des corrections ?':'Clôturer le mois ? Les corrections seront bloquées.'))return;
+    hData.locks=locked?hData.locks.filter(m=>m!==hData.month):[...hData.locks,hData.month];hSave();render();
+  };
+}
+
+/* Ajoute l'onglet au planning d'origine sans modifier ses autres fonctions. */
+const hOldRender=render;
+TABS.splice(TABS.indexOf('Paramètres'),0,'Gestion des heures');
+render=function(){
+  if(state.sector!=='tech'||state.tab!=='Gestion des heures'){
+    hOldRender();return;
+  }
+  auditCapture();save();
+  $('sectors').innerHTML=['tech','admin'].map((k,i)=>`<button data-sector="${k}" class="${state.sector===k?'on':''}">${i?'Secteur administratif':'Service technique'}</button>`).join('');
+  document.querySelectorAll('[data-sector]').forEach(b=>b.onclick=()=>{state.sector=b.dataset.sector;render()});
+  $('tabs').innerHTML=TABS.map(t=>`<button data-tab="${esc(t)}" class="${state.tab===t?'on':''}">${esc(t)}</button>`).join('');
+  document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>{state.tab=b.dataset.tab;render()});
+  $('app').innerHTML=hPage();hBind();
+};
+state.sector='tech';state.tab='Gestion des heures';render();
+
+</script></body></html>
